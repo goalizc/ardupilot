@@ -86,7 +86,8 @@ public:
         // Reserving Serial Protocol 47 for SerialProtocol_IQ
         SerialProtocol_PPP = 48,
         SerialProtocol_IBUS_Telem = 49,                // i-BUS telemetry data, ie via sensor port of FS-iA6B
-        SerialProtocol_IOMCU = 50,                     // IOMCU 
+        SerialProtocol_IOMCU = 50,                     // IOMCU
+        SerialProtocol_QrCode = 51,
         SerialProtocol_NumProtocols                    // must be the last value
     };
 
@@ -109,7 +110,7 @@ public:
 
     // have_serial - return true if we have the corresponding serial protocol configured
     bool have_serial(enum SerialProtocol protocol, uint8_t instance) const;
-    
+
     // find_baudrate - searches available serial ports for the first instance that allows the given protocol
     //  instance should be zero if searching for the first instance, 1 for the second, etc
     //  returns the baudrate of that protocol on success, 0 if a serial port cannot be found

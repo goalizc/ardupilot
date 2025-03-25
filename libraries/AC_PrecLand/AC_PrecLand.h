@@ -153,6 +153,9 @@ private:
 #if AC_PRECLAND_SITL_ENABLED
         SITL = 4,
 #endif
+#if AC_PRECLAND_QRCODE_ENABLED
+        QRCODE = 5
+#endif
     };
 
     enum PLndOptions {
