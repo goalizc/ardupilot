@@ -38,7 +38,7 @@ void AC_PrecLand_QrCode::update(void) {
                 AP::ahrs().get_relative_position_D_home(alt);
                 if (alt < 0) {
                     float dist = qcr.scale * kQrCodeWidth;
-                    _los_meas_body = Vector3f(dist * cosf(qcr.angle2), dist * sinf(qcr.angle2), -alt);
+                    _los_meas_body = Vector3f(dist * sinf(qcr.angle2), dist * cosf(qcr.angle2), -alt);
                     _los_meas_time_ms = AP_HAL::millis() - qcr.elapsed;
                     _have_los_meas = true;
                     _distance_to_target = hypotf(dist, -alt);
