@@ -42,8 +42,11 @@
 #include "geographic_msgs/msg/GeoPointStamped.h"
 #endif // AP_DDS_GPS_GLOBAL_ORIGIN_PUB_ENABLED
 #if AP_DDS_AIRSPEED_PUB_ENABLED
-#include "geometry_msgs/msg/Vector3Stamped.h"
+#include "ardupilot_msgs/msg/Airspeed.h"
 #endif // AP_DDS_AIRSPEED_PUB_ENABLED
+#if AP_DDS_RC_PUB_ENABLED
+#include "ardupilot_msgs/msg/Rc.h"
+#endif // AP_DDS_RC_PUB_ENABLED
 #if AP_DDS_GEOPOSE_PUB_ENABLED
 #include "geographic_msgs/msg/GeoPoseStamped.h"
 #endif // AP_DDS_GEOPOSE_PUB_ENABLED
@@ -153,13 +156,22 @@ private:
 #endif // AP_DDS_LOCAL_VEL_PUB_ENABLED
 
 #if AP_DDS_AIRSPEED_PUB_ENABLED
-    geometry_msgs_msg_Vector3Stamped tx_local_airspeed_topic;
+    ardupilot_msgs_msg_Airspeed tx_local_airspeed_topic;
     // The last ms timestamp AP_DDS wrote a airspeed message
     uint64_t last_airspeed_time_ms;
     //! @brief Serialize the current local airspeed and publish to the IO stream(s)
     void write_tx_local_airspeed_topic();
-    static bool update_topic(geometry_msgs_msg_Vector3Stamped& msg);
+    static bool update_topic(ardupilot_msgs_msg_Airspeed& msg);
 #endif //AP_DDS_AIRSPEED_PUB_ENABLED
+
+#if AP_DDS_RC_PUB_ENABLED
+    ardupilot_msgs_msg_Rc tx_local_rc_topic;
+    // The last ms timestamp AP_DDS wrote a rc message
+    uint64_t last_rc_time_ms;
+    //! @brief Serialize the current local rc and publish to the IO stream(s)
+    void write_tx_local_rc_topic();
+    static bool update_topic(ardupilot_msgs_msg_Rc& msg);
+#endif //AP_DDS_RC_PUB_ENABLED
 
 #if AP_DDS_BATTERY_STATE_PUB_ENABLED
     sensor_msgs_msg_BatteryState battery_state_topic;
@@ -197,11 +209,19 @@ private:
     static void update_topic(rosgraph_msgs_msg_Clock& msg);
 #endif // AP_DDS_CLOCK_PUB_ENABLED
 
+#if AP_DDS_CLOCK_SUB_ENABLED
+    // incoming external clock for simulation time sync
+    static rosgraph_msgs_msg_Clock rx_clock_topic;
+    static builtin_interfaces_msg_Time external_clock_time;
+    static bool has_received_clock;
+#endif // AP_DDS_CLOCK_SUB_ENABLED
+
 #if AP_DDS_STATUS_PUB_ENABLED
     ardupilot_msgs_msg_Status status_topic;
     bool update_topic(ardupilot_msgs_msg_Status& msg);
-    // The last ms timestamp AP_DDS wrote/checked a status message
+    // The last ms timestamps AP_DDS wrote/checked/published a status message
     uint64_t last_status_check_time_ms;
+    uint64_t last_status_publish_time_ms;
     // last status values;
     ardupilot_msgs_msg_Status last_status_msg_;
     //! @brief Serialize the current status and publish to the IO stream(s)
@@ -293,8 +313,17 @@ private:
     // pointer to transport's communication structure
     uxrCommunication *comm{nullptr};
 
-    // client key we present
-    static constexpr uint32_t key = 0xAAAABBBB;
+    // client key prefix
+    static constexpr uint32_t key_base = 0xAD000000;
+
+    // DDS constants
+    static constexpr const char *dds_pubsub_prefix = "rt";
+    static constexpr const char *dds_service_prefix = "rs";
+    static constexpr const char *dds_service_request_prefix = "rq";
+    static constexpr const char *dds_service_reply_prefix = "rr";
+    static constexpr const char *participant_name_prefix = "ap";
+
+    static void dds_format_name(char* buf, const char* dds_prefix, uint8_t sysid, const char* name, bool use_sysid_ns);
 
 
 public:
@@ -333,6 +362,9 @@ public:
 
     //! @brief Maximum number of attempts to ping the XRCE agent before exiting
     AP_Int8 ping_max_retry;
+
+    //! @brief Use namespace when enabled
+    AP_Int8 use_ns;
 
     //! @brief Enum used to mark a topic as a data reader or writer
     enum class Topic_rw : uint8_t {

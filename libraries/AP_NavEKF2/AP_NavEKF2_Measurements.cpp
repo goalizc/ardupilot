@@ -501,7 +501,7 @@ void NavEKF2_core::readGpsData()
     // do not accept data at a faster rate than 14Hz to avoid overflowing the FIFO buffer
     const auto &gps = dal.gps();
     if (gps.last_message_time_ms(gps.primary_sensor()) - lastTimeGpsReceived_ms > 70) {
-        if (gps.status() >= AP_DAL_GPS::GPS_OK_FIX_3D) {
+        if (gps.status() >= AP_GPS_FixType::FIX_3D) {
             // report GPS fix status
             gpsCheckStatus.bad_fix = false;
 
@@ -839,7 +839,7 @@ void NavEKF2_core::readRngBcnData()
 
             // set the range noise
             // TODO the range library should provide the noise/accuracy estimate for each beacon
-            rngBcnDataNew.rngErr = frontend->_rngBcnNoise;
+            rngBcnDataNew.rngErr = frontend->_rngBcnNoise.get();
 
             // set the range measurement
             rngBcnDataNew.rng = beacon->beacon_distance(index);

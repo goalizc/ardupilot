@@ -29,10 +29,6 @@
 #include <AP_Relay/AP_Relay_config.h>
 #include <RC_Channel/RC_Channel.h>
 
-#if AP_ICENGINE_TCA9554_STARTER_ENABLED
-#include "AP_ICEngine_TCA9554.h"
-#endif
-
 class AP_ICEngine {
 public:
     // constructor
@@ -64,9 +60,6 @@ public:
     // handle DO_ENGINE_CONTROL messages via MAVLink or mission
     bool engine_control(float start_control, float cold_start, float height_delay, uint32_t flags);
 
-    // update min throttle for idle governor
-    void update_idle_governor(int8_t &min_throttle);
-
     // do we have throttle while disarmed enabled?
     bool allow_throttle_while_disarmed(void) const;
 
@@ -78,6 +71,8 @@ public:
     bool get_legacy_ignition_relay_index(int8_t &num);
 #endif
 
+    int8_t get_min_throttle_pct() const { return min_throttle_pct; }
+
     static AP_ICEngine *get_singleton() { return _singleton; }
 
 private:
@@ -88,7 +83,13 @@ private:
 
     enum ICE_State state;
 
+    // Minimum throttle for idle (from idle_percent or idle governor)
+    int8_t min_throttle_pct;
+
 #if AP_RPM_ENABLED
+    // update min throttle for idle governor
+    void update_idle_governor(int8_t &min_throttle);
+
     // filter for RPM value
     LowPassFilterConstDtFloat _rpm_filter;
     float filtered_rpm_value;
@@ -153,7 +154,7 @@ private:
     float height_required;
 
     // we are waiting for valid height data
-    bool height_pending:1;
+    bool height_pending;
 
     bool allow_single_start_while_disarmed;
 
@@ -175,10 +176,6 @@ private:
 
     // Last aux function value
     RC_Channel::AuxSwitchPos aux_pos = RC_Channel::AuxSwitchPos::MIDDLE;
-
-#if AP_ICENGINE_TCA9554_STARTER_ENABLED
-    AP_ICEngine_TCA9554 tca9554_starter;
-#endif
 
 #if AP_RPM_ENABLED
     // redline rpm

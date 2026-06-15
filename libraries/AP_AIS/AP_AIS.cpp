@@ -33,6 +33,7 @@
 #include <GCS_MAVLink/GCS.h>
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_Common/ExpandingString.h>
+#include <AC_Avoidance/AP_OADatabase.h>
 
 const AP_Param::GroupInfo AP_AIS::var_info[] = {
 
@@ -272,6 +273,92 @@ void AP_AIS::send(mavlink_channel_t chan)
     }
 }
 
+#if AP_OADATABASE_ENABLED
+// Send a AIS vessel to the object avoidance database if its position is valid
+void AP_AIS::send_to_object_avoidance_database(const struct ais_vehicle_t &vessel)
+{
+    // No point if database is not enabled
+    AP_OADatabase *oaDb = AP::oadatabase();
+    if (oaDb == nullptr || !oaDb->healthy()) {
+        return;
+    }
+
+    // Need a location to avoid
+    if (!check_location(vessel.info.lat, vessel.info.lon)) {
+        return;
+    }
+
+    // Populate location object
+    const Location loc { vessel.info.lat, vessel.info.lon, 0, Location::AltFrame::ABOVE_ORIGIN };
+
+    // Get position relative to origin
+    Vector3f pos;
+    if (!loc.get_vector_from_origin_NEU_m(pos)) {
+        return;
+    }
+
+    // Need current position to calculate distance
+    Vector2f current_pos;
+    if (!AP::ahrs().get_relative_position_NE_origin_float(current_pos)) {
+        return;
+    }
+    float distance = (pos.xy() - current_pos).length();
+
+    if ((vessel.info.flags & AIS_FLAGS_VALID_DIMENSIONS) == 0) {
+        // No dimensions, let the database calculate from the configured beam width
+        oaDb->queue_push(pos, vessel.last_update_ms, distance, AP_OADatabase::OA_DbItem::Source::AIS, vessel.info.MMSI);
+        return;
+    }
+
+    // Strictly even if we do have a valid dimension the "LARGE_DIMENSION" flags could be set meaning
+    // the value is larger than what can be sent over AIS. Depending on where the receiver is mounted
+    // on the vessel this may happen on vessels longer than 511m or wider than 63m it will always happen
+    // on vessels longer than 1022m or wider than 126m
+    // There is currently no real vessel that would cause this.
+
+    if ((vessel.info.heading == 0) || (vessel.info.heading > 360 * 100)) {
+        // Heading invalid, use max dimension as radius
+        float radius = vessel.info.dimension_bow;
+        radius = MAX(radius, vessel.info.dimension_stern);
+        radius = MAX(radius, vessel.info.dimension_port);
+        radius = MAX(radius, vessel.info.dimension_starboard);
+        oaDb->queue_push(pos, vessel.last_update_ms, distance, radius, AP_OADatabase::OA_DbItem::Source::AIS, vessel.info.MMSI);
+        return;
+    }
+
+    // With heading we can offset the location to be in the center of the vessel
+    Vector2f offset {
+        (vessel.info.dimension_bow - vessel.info.dimension_stern) * 0.5,
+        (vessel.info.dimension_starboard - vessel.info.dimension_port) * 0.5
+    };
+    offset.rotate(cd_to_rad(vessel.info.heading));
+    pos.xy() += offset;
+
+    // Update distance for new position
+    distance = (pos.xy() - current_pos).length();
+
+    // Radius is now the largest average dimension
+    const float radius = MAX(
+        (vessel.info.dimension_bow + vessel.info.dimension_stern) * 0.5,
+        (vessel.info.dimension_starboard + vessel.info.dimension_port) * 0.5
+    );
+
+    oaDb->queue_push(pos, vessel.last_update_ms, distance, radius, AP_OADatabase::OA_DbItem::Source::AIS, vessel.info.MMSI);
+}
+#endif
+
+// Return true if location is valid
+bool AP_AIS::check_location(int32_t lat, int32_t lng) const
+{
+    // Check for zero zero
+    if (lat == 0 && lng == 0) {
+        return false;
+    }
+
+    // Invalid lat is sent as 181 degrees and invalid lon as 91. Check both at in range
+    return check_latlng(lat, lng);
+}
+
 // remove the given index from the AIVDM buffer and shift following elements up
 void AP_AIS::buffer_shift(uint8_t i)
 {
@@ -290,8 +377,8 @@ void AP_AIS::buffer_shift(uint8_t i)
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Functions related to the vessel list
 
-// find vessel index in existing list, if not then return NEW_NOTHROW index if possible
-bool AP_AIS::get_vessel_index(uint32_t mmsi, uint16_t &index, uint32_t lat, uint32_t lon)
+// find vessel index in existing list, if not then return new index if possible, returns true if index is valid
+bool AP_AIS::get_vessel_index(uint32_t mmsi, uint16_t &index, int32_t lat, int32_t lon)
 {
     const uint16_t list_size = _list.max_items();
 
@@ -327,7 +414,7 @@ bool AP_AIS::get_vessel_index(uint32_t mmsi, uint16_t &index, uint32_t lat, uint
 
     // could not expand list, either because of memory or max list param
     // if we have a valid incoming location we can bump a further item from the list
-    if (lat == 0 && lon == 0) {
+    if (!check_location(lat, lon)) {
         return false;
     }
 
@@ -340,6 +427,13 @@ bool AP_AIS::get_vessel_index(uint32_t mmsi, uint16_t &index, uint32_t lat, uint
     float dist;
     float max_dist = 0;
     for (uint16_t i = 0; i < list_size; i++) {
+        if (!check_location(_list[i].info.lat, _list[i].info.lon)) {
+            // Remove vessel with invalid location
+            index = i;
+            clear_list_item(index);
+            _list[index].info.MMSI = mmsi;
+            return true;
+        }
         loc.lat = _list[i].info.lat;
         loc.lng = _list[i].info.lon;
         dist = loc.get_distance(current_loc);
@@ -388,9 +482,32 @@ bool AP_AIS::payload_decode(const char *payload)
         case 5: // Static and Voyage Related Data
             return decode_static_and_voyage_data(payload);
 
+        case 18: // Standard Class B CS Position Report
+        case 19: // Extended Class B CS Position Report
+            return decode_class_B_position_report(payload, type);
+
         default:
             return false;
     }
+}
+
+// Apply scale to lat lon fields, avoiding integer overflow
+int32_t AP_AIS::scale_lat_lon(const int32_t val) const
+{
+    // This is 16.66666...
+    const double scale_factor = (1.0 / 600000.0) * 1e7;
+
+    // Because the scale factor is larger than 1 if we do this straight into the integer its
+    // possible that the value would overflow causing a floating point error
+    // That should never happen with correctly formatted NMEA, but can happen with bad data.
+    const double ret = val * scale_factor;
+    if (ret > INT32_MAX || ret < INT32_MIN) {
+        // This is outside the range of valid lat/lon
+        // This means that both the lat and lon will be ignored
+        // If we just set to 0 the lat/lon pair might look valid
+        return INT32_MAX;
+    }
+    return ret;
 }
 
 bool AP_AIS::decode_position_report(const char *payload, uint8_t type)
@@ -405,10 +522,10 @@ bool AP_AIS::decode_position_report(const char *payload, uint8_t type)
     int8_t rot  = get_bits_signed(payload, 42, 49);
     uint16_t sog       = get_bits(payload, 50, 59);
     bool pos_acc       = get_bits(payload, 60, 60);
-    int32_t lon = get_bits_signed(payload, 61, 88)  * ((1.0f / 600000.0f)*1e7);
-    int32_t lat = get_bits_signed(payload, 89, 115) * ((1.0f / 600000.0f)*1e7);
-    uint16_t cog       = get_bits(payload, 116, 127) * 10;
-    uint16_t head      = get_bits(payload, 128, 136) * 100;
+    int32_t lon = scale_lat_lon(get_bits_signed(payload, 61, 88));
+    int32_t lat = scale_lat_lon(get_bits_signed(payload, 89, 115));
+    uint16_t cog       = get_bits(payload, 116, 127) * 10;  // convert from 0.1 deg to centi-deg
+    uint16_t head      = get_bits(payload, 128, 136) * 100; // convert from deg to centi-deg
     uint8_t sec_utc    = get_bits(payload, 137, 142);
     uint8_t maneuver   = get_bits(payload, 143, 144);
     // 145 - 147: spare
@@ -416,7 +533,7 @@ bool AP_AIS::decode_position_report(const char *payload, uint8_t type)
     uint32_t radio = get_bits(payload, 149, 167);
 
 #if HAL_LOGGING_ENABLED
-    // log the raw infomation
+    // log the raw information
     if ((_log_options & AIS_OPTIONS_LOG_DECODED) != 0) {
         const struct log_AIS_msg1 pkt{
             LOG_PACKET_HEADER_INIT(LOG_AIS_MSG1),
@@ -441,12 +558,6 @@ bool AP_AIS::decode_position_report(const char *payload, uint8_t type)
     }
 #else
     (void)repeat;
-    (void)nav;
-    (void)rot;
-    (void)sog;
-    (void)pos_acc;
-    (void)cog;
-    (void)head;
     (void)sec_utc;
     (void)maneuver;
     (void)raim;
@@ -459,39 +570,27 @@ bool AP_AIS::decode_position_report(const char *payload, uint8_t type)
         return true;
     }
 
-    // mask of flags that we receive in this message
-    const uint16_t mask = ~(AIS_FLAGS_POSITION_ACCURACY | AIS_FLAGS_VALID_COG | AIS_FLAGS_VALID_VELOCITY | AIS_FLAGS_VALID_TURN_RATE | AIS_FLAGS_TURN_RATE_SIGN_ONLY);
-    uint16_t flags = _list[index].info.flags & mask; // clear all flags that will be updated
-    if (pos_acc) {
-        flags |= AIS_FLAGS_POSITION_ACCURACY;
-    }
-    if (cog < 36000) {
-        flags |= AIS_FLAGS_VALID_COG;
-    }
-    if (sog < 1023) {
-        flags |= AIS_FLAGS_VALID_VELOCITY;
-    }
-    if (sog == 1022) {
-        flags |= AIS_FLAGS_HIGH_VELOCITY;
-    }
-    if (rot > -128) {
-        flags |= AIS_FLAGS_VALID_TURN_RATE;
-    }
-    if (rot == 127 || rot == -127) {
-        flags |= AIS_FLAGS_TURN_RATE_SIGN_ONLY;
-    } else {
-        rot = powf((rot / 4.733f),2.0f) / 6.0f;
-    }
+    // Position accuracy
+    _list[index].set_pos_acc(pos_acc);
+
+    // Course over ground
+    _list[index].set_cog(cog);
+
+    // Speed over ground
+    _list[index].set_sog(sog);
+
+    // Rate of turn
+    _list[index].set_rot(rot);
 
     _list[index].info.lat = lat; // int32_t [degE7] Latitude
     _list[index].info.lon = lon; // int32_t [degE7] Longitude
-    _list[index].info.COG = cog; // uint16_t [cdeg] Course over ground
     _list[index].info.heading = head; // uint16_t [cdeg] True heading
-    _list[index].info.velocity = sog; // uint16_t [cm/s] Speed over ground
-    _list[index].info.flags = flags; // uint16_t Bitmask to indicate various statuses including valid data fields
-    _list[index].info.turn_rate = rot; // int8_t [cdeg/s] Turn rate
     _list[index].info.navigational_status = nav; // uint8_t Navigational status
     _list[index].last_update_ms = AP_HAL::millis();
+
+#if AP_OADATABASE_ENABLED
+    send_to_object_avoidance_database(_list[index]);
+#endif
 
     return true;
 }
@@ -511,15 +610,15 @@ bool AP_AIS::decode_base_station_report(const char *payload)
     uint8_t minute     = get_bits(payload, 66, 71);
     uint8_t second     = get_bits(payload, 72, 77);
     bool fix           = get_bits(payload, 78, 78);
-    int32_t lon = get_bits_signed(payload, 79, 106)  * ((1.0f / 600000.0f)*1e7);
-    int32_t lat = get_bits_signed(payload, 107, 133) * ((1.0f / 600000.0f)*1e7);
+    int32_t lon = scale_lat_lon(get_bits_signed(payload, 79, 106));
+    int32_t lat = scale_lat_lon(get_bits_signed(payload, 107, 133));
     uint8_t epfd       = get_bits(payload, 134, 137);
     // 138 - 147: spare
     bool raim          = get_bits(payload, 148, 148);
     uint32_t radio     = get_bits(payload, 149, 167);
 
 #if HAL_LOGGING_ENABLED
-    // log the raw infomation
+    // log the raw information
     if ((_log_options & AIS_OPTIONS_LOG_DECODED) != 0) {
         struct log_AIS_msg4 pkt {
             LOG_PACKET_HEADER_INIT(LOG_AIS_MSG4),
@@ -564,6 +663,10 @@ bool AP_AIS::decode_base_station_report(const char *payload)
     _list[index].info.lon = lon; // int32_t [degE7] Longitude
     _list[index].last_update_ms = AP_HAL::millis();
 
+#if AP_OADATABASE_ENABLED
+    send_to_object_avoidance_database(_list[index]);
+#endif
+
     return true;
 }
 
@@ -573,9 +676,19 @@ bool AP_AIS::decode_static_and_voyage_data(const char *payload)
         return false;
     }
 
-    char call_sign[8];
-    char name[21];
-    char dest[21];
+    // Strings to use in get_char calls
+    char call_sign[8] = {};
+    char name[21] = {};
+    char dest[21] = {};
+
+    // Make sure the strings are long enough for the bit numbers passed to `get_char`
+    static_assert(sizeof(call_sign) > ((111 - 70) + 1)/6, "Callsign string length error");
+    static_assert(sizeof(name) > ((231 - 112) + 1)/6, "Name string length error");
+    static_assert(sizeof(dest) > ((421 - 302) + 1)/6, "Dest string length error");
+
+    // Make sure the strings are long enough, `set_callsign` and `set_name` assume a fixed size
+    static_assert(sizeof(call_sign) > sizeof(mavlink_ais_vessel_t::callsign), "Callsign string length error");
+    static_assert(sizeof(name) > sizeof(mavlink_ais_vessel_t::name), "Name string length error");
 
     uint8_t repeat      = get_bits(payload, 6, 7);
     uint32_t mmsi       = get_bits(payload, 8, 37);
@@ -599,7 +712,7 @@ bool AP_AIS::decode_static_and_voyage_data(const char *payload)
     // 423 - 426: spare
 
 #if HAL_LOGGING_ENABLED
-    // log the raw infomation
+    // log the raw information
     if ((_log_options & AIS_OPTIONS_LOG_DECODED) != 0) {
         struct log_AIS_msg5 pkt {
             LOG_PACKET_HEADER_INIT(LOG_AIS_MSG5),
@@ -639,41 +752,156 @@ bool AP_AIS::decode_static_and_voyage_data(const char *payload)
         return true;
     }
 
-    // mask of flags that we receive in this message
-    const uint16_t mask = ~(AIS_FLAGS_VALID_DIMENSIONS | AIS_FLAGS_LARGE_BOW_DIMENSION | AIS_FLAGS_LARGE_STERN_DIMENSION | AIS_FLAGS_LARGE_STARBOARD_DIMENSION | AIS_FLAGS_VALID_CALLSIGN | AIS_FLAGS_VALID_NAME);
-    uint16_t flags = _list[index].info.flags & mask; // clear all flags that will be updated
-    if (bow_dim != 0 && stern_dim != 0 && port_dim != 0 && star_dim != 0) {
-        flags |= AIS_FLAGS_VALID_DIMENSIONS;
-        if (bow_dim == 511) {
-            flags |= AIS_FLAGS_LARGE_BOW_DIMENSION;
-        }
-        if (stern_dim == 511) {
-            flags |= AIS_FLAGS_LARGE_STERN_DIMENSION;
-        }
-        if (port_dim == 63) {
-            flags |= AIS_FLAGS_LARGE_PORT_DIMENSION;
-        }
-        if (star_dim == 63) {
-            flags |= AIS_FLAGS_LARGE_STARBOARD_DIMENSION;
-        }
-    }
-    if (strlen(call_sign) != 0) {
-        flags |= AIS_FLAGS_VALID_CALLSIGN;
-    }
-    if (strlen(name) != 0) {
-        flags |= AIS_FLAGS_VALID_NAME;
-    }
+    // Apply dimensions to vessel object
+    _list[index].set_dimensions(bow_dim, stern_dim, port_dim, star_dim);
 
-    _list[index].info.dimension_bow = bow_dim; // uint16_t [m] Distance from lat/lon location to bow
-    _list[index].info.dimension_stern = stern_dim; // uint16_t [m] Distance from lat/lon location to stern
-    _list[index].info.flags = flags; // uint16_t Bitmask to indicate various statuses including valid data fields
+    // Set call sign and name
+    _list[index].set_callsign(call_sign);
+    _list[index].set_name(name);
+
     _list[index].info.type = vessel_type; // uint8_t Type of vessels
-    _list[index].info.dimension_port = port_dim; // uint8_t [m] Distance from lat/lon location to port side
-    _list[index].info.dimension_starboard = star_dim; // uint8_t [m] Distance from lat/lon location to starboard side
-    memcpy(_list[index].info.callsign,call_sign,sizeof(_list[index].info.callsign)); // char The vessel callsign
-    memcpy(_list[index].info.name,name,sizeof(_list[index].info.name)); // char The vessel name
 
     // note that the last contact time is not updated, this message does not provide a location for a valid vessel a location must be received
+    return true;
+}
+
+// Standard Class B CS Position Report
+bool AP_AIS::decode_class_B_position_report(const char *payload, uint8_t type)
+{
+    const size_t len = strlen(payload);
+
+    switch (type) {
+    case 18: // Standard Class B CS Position Report
+        if (len != 28) {
+            return false;
+        }
+        break;
+
+    case 19: // Extended Class B CS Position Report
+        if (len != 52) {
+            return false;
+        }
+        break;
+
+    default: // Should never happen
+        return false;
+    }
+
+    // Common fields between types 18 and 19
+    uint8_t repeat     = get_bits(payload, 6, 7);
+    uint32_t mmsi      = get_bits(payload, 8, 37);
+    // 38 - 45: Regional Reserved
+    uint16_t sog       = get_bits(payload, 46, 55);
+    bool pos_acc       = get_bits(payload, 56, 56);
+    int32_t lon = scale_lat_lon(get_bits_signed(payload, 57, 84));
+    int32_t lat = scale_lat_lon(get_bits_signed(payload, 85, 111));
+    uint16_t cog       = get_bits(payload, 112, 123) * 10;  // convert from 0.1 deg to centi-deg
+    uint16_t head      = get_bits(payload, 124, 132) * 100; // convert from deg to centi-deg
+    uint8_t sec_utc    = get_bits(payload, 133, 138);
+
+    // From bit 139 onwards the standard and extended messages differ
+    bool raim = false;
+    uint32_t radio = 0;
+
+    switch (type) {
+    case 18: // Standard Class B CS Position Report
+        // 139 - 140: Regional reserved
+        // 141 - 141: CS Unit
+        // 142 - 142: Display flag
+        // 143 - 143: DSC flag
+        // 144 - 144: Band flag
+        // 145 - 145: Message 22 flag
+        // 146 - 146: Assigned mode flag
+        raim  = get_bits(payload, 147, 147);
+        radio = get_bits(payload, 148, 167);
+        break;
+
+    case 19: // Extended Class B CS Position Report
+        // 139 - 142: Regional reserved
+        // 143 - 262: Name
+        // 263 - 270: vessel type
+        // 271 - 279: bow dim
+        // 280 - 288: stern dim
+        // 289 - 294: port dim
+        // 295 - 300: star dim
+        // 301 - 304: fix
+        raim = get_bits(payload, 305, 305);
+        // 306 - 306: Assigned mode flag
+        // 308 - 311: Spare
+        break;
+    }
+
+#if HAL_LOGGING_ENABLED
+    // log the raw information
+    if ((_log_options & AIS_OPTIONS_LOG_DECODED) != 0) {
+        const struct log_AIS_msg1 pkt{
+            LOG_PACKET_HEADER_INIT(LOG_AIS_MSG1),
+            time_us      : AP_HAL::micros64(),
+            type         : type,
+            repeat       : repeat,
+            mmsi         : mmsi,
+            nav          : 0,
+            rot          : 0,
+            sog          : sog,
+            pos_acc      : pos_acc,
+            lon          : lon,
+            lat          : lat,
+            cog          : cog,
+            head         : head,
+            sec_utc      : sec_utc,
+            maneuver     : 0,
+            raim         : raim,
+            radio        : radio
+        };
+        AP::logger().WriteBlock(&pkt, sizeof(pkt));
+    }
+#else
+    (void)repeat;
+    (void)sec_utc;
+    (void)raim;
+    (void)radio;
+#endif
+
+    uint16_t index;
+    if (!get_vessel_index(mmsi, index, lat, lon)) {
+        // no room in the vessel list
+        return true;
+    }
+
+    // Position accuracy
+    _list[index].set_pos_acc(pos_acc);
+
+    // Course over ground
+    _list[index].set_cog(cog);
+
+    // Speed over ground
+    _list[index].set_sog(sog);
+
+    if (type == 19) {
+        // Fields only available in the extended message
+        char name[21] = {};
+        static_assert(sizeof(name) > sizeof(mavlink_ais_vessel_t::name), "Name string length error");
+        static_assert(sizeof(name) > ((262 - 143) + 1)/6, "Name string length error");
+        get_char(payload, name, 143, 262);
+        _list[index].set_name(name);
+
+        _list[index].info.type = get_bits(payload, 263, 270); // uint8_t Type of vessels
+
+        // Dimensions
+        _list[index].set_dimensions(get_bits(payload, 271, 279),
+                                    get_bits(payload, 280, 288),
+                                    get_bits(payload, 289, 294),
+                                    get_bits(payload, 295, 300));
+    }
+
+    _list[index].info.lat = lat;
+    _list[index].info.lon = lon;
+    _list[index].info.heading = head;
+    _list[index].last_update_ms = AP_HAL::millis();
+
+#if AP_OADATABASE_ENABLED
+    send_to_object_avoidance_database(_list[index]);
+#endif
 
     return true;
 }
@@ -831,7 +1059,10 @@ bool AP_AIS::decode_latest_term()
     // handle the last term in a message
     if (_term_is_checksum) {
         _sentence_done = true;
-        uint8_t checksum = 16 * char_to_hex(_term[0]) + char_to_hex(_term[1]);
+        uint8_t checksum;
+        if (!hex_twochars_to_uint8(_term, checksum)) {
+            return false;
+        }
         return ((checksum == _checksum) && _sentence_valid);
     }
 

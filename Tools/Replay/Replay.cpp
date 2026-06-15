@@ -39,6 +39,7 @@ static ReplayVehicle replayvehicle;
 user_parameter *user_parameters;
 bool replay_force_ekf2;
 bool replay_force_ekf3;
+bool show_progress;
 
 const AP_Param::Info ReplayVehicle::var_info[] = {
     GSCALAR(dummy,         "_DUMMY", 0),
@@ -91,18 +92,12 @@ void ReplayVehicle::load_parameters(void)
     AP_Param::load_all();
 }
 
-const struct AP_Param::GroupInfo        GCS_MAVLINK_Parameters::var_info[] = {
-    AP_GROUPEND
-};
 GCS_Dummy _gcs;
 
 #if AP_ADVANCEDFAILSAFE_ENABLED
 AP_AdvancedFailsafe *AP::advancedfailsafe() { return nullptr; }
 bool AP_AdvancedFailsafe::gcs_terminate(bool should_terminate, const char *reason) { return false; }
 #endif
-
-// dummy method to avoid linking AP_Avoidance
-// AP_Avoidance *AP::ap_avoidance() { return nullptr; }
 
 #if AP_LTM_TELEM_ENABLED
 // avoid building/linking LTM:
@@ -130,6 +125,7 @@ void Replay::usage(void)
     ::printf("\t--param-file FILENAME  load parameters from a file\n");
     ::printf("\t--force-ekf2 force enable EKF2\n");
     ::printf("\t--force-ekf3 force enable EKF3\n");
+    ::printf("\t--progress  show a progress bar during replay\n");
 }
 
 enum param_key : uint8_t {
@@ -146,11 +142,12 @@ void Replay::_parse_command_line(uint8_t argc, char * const argv[])
         {"param-file",      true,   0, 'F'},
         {"force-ekf2",      false,  0, param_key::FORCE_EKF2},
         {"force-ekf3",      false,  0, param_key::FORCE_EKF3},
+        {"progress",        false,  0, 'P'},
         {"help",            false,  0, 'h'},
         {0, false, 0, 0}
     };
 
-    GetOptLong gopt(argc, argv, "p:F:h", options);
+    GetOptLong gopt(argc, argv, "p:F:Ph", options);
 
     int opt;
     while ((opt = gopt.getoption()) != -1) {
@@ -163,7 +160,7 @@ void Replay::_parse_command_line(uint8_t argc, char * const argv[])
             }
             struct user_parameter *u = NEW_NOTHROW user_parameter;
             strncpy(u->name, gopt.optarg, eq-gopt.optarg);
-            u->value = atof(eq+1);
+            u->value = strtof(eq+1, nullptr);
             u->next = user_parameters;
             user_parameters = u;
             break;
@@ -179,6 +176,10 @@ void Replay::_parse_command_line(uint8_t argc, char * const argv[])
 
         case param_key::FORCE_EKF3:
             replay_force_ekf3 = true;
+            break;
+            
+        case 'P':
+            show_progress = true;
             break;
 
         case 'h':
@@ -303,6 +304,35 @@ void Replay::loop()
 #endif
         exit(0);
     }
+    
+    // Display progress bar if enabled
+    if (show_progress) {
+        uint32_t now = AP_HAL::millis();
+        if (now - last_progress_update > 100) { // Update every 100ms
+            last_progress_update = now;
+            float percent = reader.get_percent_read();
+            
+            // Create a 50-character progress bar
+            const uint8_t bar_width = 50;
+            uint8_t completed_chars = (uint8_t)(percent * bar_width / 100.0f);
+            
+            // Print the progress bar
+            printf("\rProgress: [");
+            for (uint8_t i = 0; i < bar_width; i++) {
+                if (i < completed_chars) {
+                    printf("=");
+                } else if (i == completed_chars) {
+                    printf(">");
+                } else {
+                    printf(" ");
+                }
+            }
+            printf("] %.1f%%", percent);
+            if (percent >= 100.0f) {
+                printf("\n");
+            }
+        }
+    }
 }
 
 /*
@@ -338,7 +368,7 @@ bool Replay::parse_param_line(char *line, char **vname, float &value)
     if (value_s == NULL) {
         return false;
     }
-    value = atof(value_s);
+    value = strtof(value_s, nullptr);
     *vname = pname;
     return true;
 }

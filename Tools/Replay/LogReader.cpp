@@ -86,6 +86,8 @@ bool LogReader::handle_log_format_msg(const struct log_Format &f)
 	    msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RISH(formats[f.type]);
 	} else if (streq(name, "RISI")) {
 	    msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RISI(formats[f.type]);
+	} else if (streq(name, "RISJ")) {
+	    msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RISJ(formats[f.type]);
     } else if (streq(name, "RASH")) {
 	    msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RASH(formats[f.type]);
 	} else if (streq(name, "RASI")) {
@@ -126,6 +128,8 @@ bool LogReader::handle_log_format_msg(const struct log_Format &f)
         msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RWOH(formats[f.type], ekf2, ekf3);
     } else if (streq(name, "RBOH")) {
         msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RBOH(formats[f.type], ekf2, ekf3);
+    } else if (streq(name, "RTER")) {
+        msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RTER(formats[f.type], ekf2, ekf3);
 	} else {
         // debug("  No parser for (%s)\n", name);
     }

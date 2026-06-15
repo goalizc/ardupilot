@@ -32,8 +32,6 @@ OSCILLATOR_HZ 24000000
 
 FLASH_SIZE_KB 2048
 
-# with 2M flash we can afford to optimize for speed
-env OPTIMIZE -O2
 
 # start on 2th sector (1st sector for bootloader)
 FLASH_RESERVE_START_KB 128
@@ -270,4 +268,4 @@ BARO DPS310  SPI:dps310
 
 # 1 compass
 COMPASS AK09916:probe_ICM20948 0 ROTATION_ROLL_180
-define HAL_PROBE_EXTERNAL_I2C_COMPASSES
+define AP_COMPASS_PROBING_ENABLED 1

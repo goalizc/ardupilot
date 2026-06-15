@@ -22,13 +22,23 @@
 //    param set GPS1_TYPE 11 // GSOF
 //    param set SERIAL3_PROTOCOL 5 // GPS
 //
+// Usage with NET parameters and ethernet in SITL with hardware:
+//     param set NET_ENABLE 1
+//     param set NET_P1_TYPE 2
+//     param set NET_P1_PROTOCOL 5
+//     param set SERIAL3_PROTOCOL 0
+//     param set SIM_GPS1_TYPE 0
+//     param set NET_P1_PORT 44444
+//     param set GPS1_TYPE 11
+//     param set GPS_AUTO_CONFIG 0
+// 
 //  Pure SITL usage:
 //    sim_vehicle.py -v Plane --console --map -DG
 //    param set SIM_GPS1_TYPE 11 // GSOF
 //    param set GPS1_TYPE 11 // GSOF
 //    param set SERIAL3_PROTOCOL 5 // GPS
 
-#define ALLOW_DOUBLE_MATH_FUNCTIONS
+#define AP_MATH_ALLOW_DOUBLE_FUNCTIONS 1
 
 #include "AP_GPS.h"
 #include "AP_GPS_GSOF.h"
@@ -46,6 +56,11 @@ AP_GPS_GSOF::AP_GPS_GSOF(AP_GPS &_gps,
                          AP_HAL::UARTDriver *_port) :
     AP_GPS_Backend(_gps, _params, _state, _port)
 {
+
+    if (port == nullptr) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "GSOF instance %d has no port", state.instance);
+        return;
+    }
 
     const uint16_t gsofmsgreq[5] = {
         AP_GSOF::POS_TIME,
@@ -68,16 +83,16 @@ AP_GPS_GSOF::AP_GPS_GSOF(AP_GPS &_gps,
         GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "GSOF instance %d has invalid COM port setting of %d", state.instance, (unsigned)com_port);
         return;
     }
-    requestBaud(static_cast<HW_Port>(unsigned(com_port)));
+
+    if (gps._auto_config >= AP_GPS::GPS_AUTO_CONFIG_ENABLE_SERIAL_ONLY) {
+        requestBaud(static_cast<HW_Port>(unsigned(com_port)));
+    }
 
     const uint32_t now = AP_HAL::millis();
     gsofmsg_time = now + 110;
 }
 
-// Process all bytes available from the stream
-//
-bool
-AP_GPS_GSOF::read(void)
+bool AP_GPS_GSOF::configure(void)
 {
     const uint32_t now = AP_HAL::millis();
 
@@ -100,13 +115,23 @@ AP_GPS_GSOF::read(void)
             next_req_gsof++;
         }
     }
+    return true;
+}
 
+// Process all bytes available from the stream
+//
+bool
+AP_GPS_GSOF::read(void)
+{
+    if (gps._auto_config >= AP_GPS::GPS_AUTO_CONFIG_ENABLE_SERIAL_ONLY) {
+        if (!configure()) return false;
+    }
     while (port->available() > 0) {
         const uint8_t temp = port->read();
 #if AP_GPS_DEBUG_LOGGING_ENABLED
         log_data(&temp, 1);
 #endif
-        AP_GSOF::MsgTypes parsed;
+        AP_GSOF::MsgTypes parsed {};
         const int parse_status = parse(temp, parsed);
         if(parse_status == PARSED_GSOF_DATA) {
             if (parsed.get(AP_GSOF::POS_TIME) &&
@@ -188,19 +213,19 @@ AP_GPS_GSOF::pack_state_data()
     state.num_sats = pos_time.num_sats;
 
     if ((pos_time.pos_flags1 & 1)) { // New position
-        state.status = AP_GPS::GPS_OK_FIX_3D;
+        state.status = AP_GPS_FixType::FIX_3D;
         if ((pos_time.pos_flags2 & 1)) { // Differential position 
-            state.status = AP_GPS::GPS_OK_FIX_3D_DGPS;
+            state.status = AP_GPS_FixType::DGPS;
             if (pos_time.pos_flags2 & 2) { // Differential position method
                 if (pos_time.pos_flags2 & 4) {// Differential position method
-                    state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FIXED;
+                    state.status = AP_GPS_FixType::RTK_FIXED;
                 } else {
-                    state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FLOAT;
+                    state.status = AP_GPS_FixType::RTK_FLOAT;
                 }
             }
         }
     } else {
-        state.status = AP_GPS::NO_FIX;
+        state.status = AP_GPS_FixType::NONE;
     }
 
     state.location.lat = (int32_t)(RAD_TO_DEG_DOUBLE * position.latitude_rad * (double)1e7);

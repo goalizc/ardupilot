@@ -130,7 +130,7 @@ BARO BMP280 I2C:0:0x76
 # no built-in compass, but probe the i2c bus for all possible
 # external compass types
 define ALLOW_ARM_NO_COMPASS
-define HAL_PROBE_EXTERNAL_I2C_COMPASSES
+define AP_COMPASS_PROBING_ENABLED 1
 define HAL_I2C_INTERNAL_MASK 0
 
 # Motor order implies Betaflight/X for standard ESCs
@@ -143,7 +143,7 @@ STORAGE_FLASH_PAGE 1
 
 # setup for OSD
 define OSD_ENABLED 1
-define HAL_OSD_TYPE_DEFAULT 5
+define HAL_OSD_TYPE_DEFAULT 1
 ROMFS_WILDCARD libraries/AP_OSD/fonts/font*.bin
 
 # minimal drivers to reduce flash usage

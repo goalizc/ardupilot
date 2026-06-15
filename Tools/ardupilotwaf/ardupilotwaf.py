@@ -1,5 +1,7 @@
 # encoding: utf-8
 
+# flake8: noqa
+
 from waflib import Build, ConfigSet, Configure, Context, Errors, Logs, Options, Utils, Task
 from waflib.Configure import conf
 from waflib.Scripting import run_command
@@ -8,8 +10,6 @@ import os.path, os
 from pathlib import Path
 from collections import OrderedDict
 import subprocess
-
-import ap_persistent
 
 SOURCE_EXTS = [
     '*.S',
@@ -40,6 +40,7 @@ COMMON_VEHICLE_DEPENDENT_LIBRARIES = [
     'AP_GSOF',
     'AP_HAL',
     'AP_HAL_Empty',
+    'AP_DDS',
     'AP_InertialSensor',
     'AP_Math',
     'AP_Mission',
@@ -51,6 +52,7 @@ COMMON_VEHICLE_DEPENDENT_LIBRARIES = [
     'AP_OpticalFlow',
     'AP_Param',
     'AP_Rally',
+    'AP_LightWareSerial',
     'AP_RangeFinder',
     'AP_Scheduler',
     'AP_SerialManager',
@@ -159,14 +161,13 @@ def set_double_precision_flags(flags):
                 flags.remove(opt)
             except ValueError:
                 break
-    flags.append("-DALLOW_DOUBLE_MATH_FUNCTIONS")
+    flags.append("-DAP_MATH_ALLOW_DOUBLE_FUNCTIONS=1")
 
     return flags
 
 IGNORED_AP_LIBRARIES = [
     'doc',
     'AP_Scripting', # this gets explicitly included when it is needed and should otherwise never be globbed in
-    'AP_DDS',
 ]
 
 
@@ -437,8 +438,12 @@ def ap_stlib(bld, **kw):
     for l in kw['ap_libraries']:
         bld.ap_library(l, kw['ap_vehicle'])
 
-    if 'dynamic_source' not in kw:
-        kw['dynamic_source'] = 'modules/DroneCAN/libcanard/dsdlc_generated/src/**.c'
+    # Pull the shared 'dronecan_libs' objects target (see
+    # _build_common_taskgens()) in via 'use'
+    if 'dynamic_source' not in kw and \
+            (bld.get_board().with_can or bld.env.HAL_NUM_CAN_IFACES) and \
+            not bld.env.AP_PERIPH:
+        kw['use'] = unique_list(Utils.to_list(kw.get('use', [])) + ['dronecan_libs'])
 
     kw['features'] = kw.get('features', []) + ['cxx', 'cxxstlib']
     kw['target'] = kw['name']
@@ -498,12 +503,22 @@ def ap_find_tests(bld, use=[], DOUBLE_PRECISION_SOURCES=[]):
 _versions = []
 
 @conf
-def ap_version_append_str(ctx, k, v):
-    ctx.env['AP_VERSION_ITEMS'] += [(k, '"{}"'.format(os.environ.get(k, v)))]
+def ap_version_append_str(ctx, k, v, consistent_v=None):
+    if ctx.env.CONSISTENT_BUILDS and consistent_v is not None:
+        v = consistent_v # override with consistent value
+    else:
+        v = os.environ.get(k, v) # use v unless defined in environment
+
+    ctx.env['AP_VERSION_ITEMS'] += [(k, f'"{v}"')]
 
 @conf
-def ap_version_append_int(ctx, k, v):
-    ctx.env['AP_VERSION_ITEMS'] += [(k, '{}'.format(os.environ.get(k, v)))]
+def ap_version_append_int(ctx, k, v, consistent_v=None):
+    if ctx.env.CONSISTENT_BUILDS and consistent_v is not None:
+        v = consistent_v # override with consistent value
+    else:
+        v = os.environ.get(k, v) # use v unless defined in environment
+
+    ctx.env['AP_VERSION_ITEMS'] += [(k, f'{v}')]
 
 @conf
 def write_version_header(ctx, tgt):
@@ -679,7 +694,7 @@ arducopter and upload it to my board".
         action='store',
         dest='upload_port',
         default=None,
-        help='''Specify the port to be used with the --upload option. For example a port of /dev/ttyS10 indicates that serial port 10 shuld be used.
+        help='''Specify the port to be used with the --upload option. For example a port of /dev/ttyS10 indicates that serial port 10 should be used.
 ''')
 
     g.add_option('--upload-blueos',
@@ -706,21 +721,12 @@ arducopter and upload it to my board".
 
     g = opt.ap_groups['clean']
 
-    g.add_option('--clean-all-sigs',
-        action='store_true',
-        help='''Clean signatures for all tasks. By default, tasks that scan for
-implicit dependencies (like the compilation tasks) keep the dependency
-information across clean commands, so that that information is changed
-only when really necessary. Also, some tasks that don't really produce
-files persist their signature. This option avoids that behavior when
-cleaning the build.
-''')
-
     g.add_option('--asan',
         action='store_true',
-        help='''Build using the macOS clang Address Sanitizer. In order to run with
-Address Sanitizer support llvm-symbolizer is required to be on the PATH.
-This option is only supported on macOS versions of clang.
+        help='''Build using the clang Address Sanitizer (Linux and macOS). Requires
+clang to be selected via the CXX/CC environment variables, e.g.:
+  CXX=clang++-19 CC=clang-19 ./waf configure --board sitl --asan
+llvm-symbolizer must be on the PATH for symbolised reports.
 ''')
 
     g.add_option('--ubsan',

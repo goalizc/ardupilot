@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 '''
 AP_FLAKE8_CLEAN
@@ -229,6 +229,9 @@ class EnumDocco(object):
             self.name = name
             self.entries = entries
 
+        def __str__(self):
+            return f"EnumDocco.Enumeration: {self.name} [{len(self.entries)} entries]"
+
     def search_for_files(self, dirs_to_search):
         _next = []
         for _dir in dirs_to_search:
@@ -250,6 +253,12 @@ class EnumDocco(object):
                     continue
                 # Failed to match (    IOEVENT_PWM = EVENT_MASK(1),)
                 if filepath.endswith("libraries/AP_IOMCU/iofirmware/iofirmware.cpp"):
+                    continue
+                if filepath.endswith("libraries/AP_GPS/AP_GPS_UBLOX_CFG_Keys.h"):
+                    continue
+                if filepath.endswith("libraries/AP_GPS/AP_GPS_UBLOX_CFGv2.cpp"):
+                    continue
+                if filepath.endswith("libraries/AP_GPS/AP_GPS_UBLOX_CFGv2.h"):
                     continue
                 self.files.append(filepath)
         if len(_next):
@@ -285,3 +294,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     s.run()
+
+    if args.verbose:
+        for e in s.enumerations:
+            print(e)

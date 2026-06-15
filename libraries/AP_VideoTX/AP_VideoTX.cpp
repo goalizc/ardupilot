@@ -96,7 +96,7 @@ const uint16_t AP_VideoTX::VIDEO_CHANNELS[AP_VideoTX::MAX_BANDS][VTX_MAX_CHANNEL
     { 5705, 5685, 5665, 5645, 5885, 5905, 5925, 5945}, /* Band E */
     { 5740, 5760, 5780, 5800, 5820, 5840, 5860, 5880}, /* Airwave */
     { 5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917}, /* Race */
-    { 5621, 5584, 5547, 5510, 5473, 5436, 5399, 5362}, /* LO Race */
+    { 5362, 5399, 5436, 5473, 5510, 5547, 5584, 5621}, /* LO Race */
     { 1080, 1120, 1160, 1200, 1240, 1280, 1320, 1360}, /* Band 1G3_A */
     { 1080, 1120, 1160, 1200, 1258, 1280, 1320, 1360}, /* Band 1G3_B */
     { 4990, 5020, 5050, 5080, 5110, 5140, 5170, 5200}, /* Band X */
@@ -276,9 +276,22 @@ void AP_VideoTX::set_power_mw(uint16_t power)
     for (uint8_t i = 0; i < VTX_MAX_POWER_LEVELS; i++) {
         if (power == _power_levels[i].mw) {
             _current_power = i;
-            break;
+            return;
         }
     }
+    // power 0 (pit mode) should always match the built-in 0mW entry; bail
+    // here so it can never reach log10f below
+    if (power == 0) {
+        return;
+    }
+    // non-standard value (e.g. Tramp 2500mW): stash it in the custom slot
+    PowerLevel &slot = _power_levels[VTX_MAX_POWER_LEVELS - 1];
+    slot.mw = power;
+    slot.dbm = uint8_t(roundf(10.0f * log10f(float(power))));
+    slot.level = 255;
+    slot.dac = 255;
+    slot.active = PowerActive::Active;
+    _current_power = VTX_MAX_POWER_LEVELS - 1;
 }
 
 // set the power "level"
@@ -401,6 +414,10 @@ bool AP_VideoTX::update_power() const {
             && _power_levels[i].active != PowerActive::Inactive) {
             return true;
         }
+    }
+    // Tramp accepts arbitrary mW; the table check above is SmartAudio-only
+    if (_power_mw > 0 && is_provider_enabled(VTXType::Tramp)) {
+        return true;
     }
     // asked for something unsupported - only SA2.1 allows this and will have already provided a list
     return false;
@@ -528,6 +545,11 @@ void AP_VideoTX::change_power(int8_t position)
             debug("selected power %dmw", power);
             break;
         }
+    }
+
+    if (position == 5 && power < _max_power_mw) {
+        power = _max_power_mw;
+        debug("selected power %dmw", power);
     }
 
     if (power == 0) {

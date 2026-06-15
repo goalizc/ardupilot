@@ -289,6 +289,7 @@ local function MAVLinkProcessor()
                     loc:alt(_mavresult.z * 100)
                     if _mavresult.frame == 10 then -- MAV_FRAME_GLOBAL_TERRAIN_ALT
                         loc:terrain_alt(true)
+                        loc:relative_alt(true)
                     elseif _mavresult.frame == 3 then -- MAV_FRAME_GLOBAL_RELATIVE_ALT
                         loc:relative_alt(true)
                     end
@@ -403,7 +404,7 @@ local function MAVLinkProcessor()
 
         -- create the header. Assume componentid of 1
         local header = string.pack('<BBBBBB', PROTOCOL_MARKER_V1, #payload,
-                                   _txseqid, param:get('SYSID_THISMAV'), 1,
+                                   _txseqid, param:get('MAV_SYSID'), 1,
                                    msgid)
 
         -- generate the CRC
@@ -447,7 +448,7 @@ local function RockblockModem()
     
     local _modem_history = {}
     local _modem_to_send = {}
-    local _str_recieved = ""
+    local _str_received = ""
     
     -- Get any incoming data
     function self.rxdata(inchar)
@@ -456,30 +457,30 @@ local function RockblockModem()
         if _modem_history[#_modem_history] == 'AT+SBDRB' and self.in_read_cycle == false and self.rx_len > 0 then
             -- read buffer may include /r and /n, so need a special cycle to capture all up to the self.rx_len
             self.in_read_cycle = true
-            _str_recieved = _str_recieved .. read
-        elseif self.in_read_cycle and #_str_recieved == self.rx_len + 3 then
+            _str_received = _str_received .. read
+        elseif self.in_read_cycle and #_str_received == self.rx_len + 3 then
             -- get last byte in read cycle
-            _str_recieved = _str_recieved .. read
+            _str_received = _str_received .. read
             self.in_read_cycle = false
             self.rx_len = 0
-            table.insert(_modem_history, _str_recieved)
-            _str_recieved = ""
+            table.insert(_modem_history, _str_received)
+            _str_received = ""
             if RCK_DEBUG:get() == 1 then
                 gcs:send_text(3, "Rockblock: Modem rx msg: " ..
                                   self.nicestring(_modem_history[#_modem_history]))
             end
         elseif (read == '\r' or read == '\n') and not self.in_read_cycle then
-            if #_str_recieved > 0 then
-                table.insert(_modem_history, _str_recieved)
+            if #_str_received > 0 then
+                table.insert(_modem_history, _str_received)
                 if RCK_DEBUG:get() == 1 then
                     gcs:send_text(3, "Rockblock: Modem response: " ..
                                       self.nicestring(_modem_history[#_modem_history]))
                 end
                 maybepkt = self.check_cmd_return()
             end
-            _str_recieved = ""
+            _str_received = ""
         else
-            _str_recieved = _str_recieved .. read
+            _str_received = _str_received .. read
         end
         return maybepkt
     end
@@ -759,7 +760,7 @@ function HLSatcom()
     --- check if GCS telemetry has been lost for RCK_TIMEOUT sec (if param enabled)
     if RCK_FORCEHL:get() == 2 then
         -- link lost time = boot time - GCS last seen time
-        link_lost_for = millis():toint() - gcs:last_seen()
+        link_lost_for = (millis()- gcs:last_seen()):toint()
         -- gcs:last_seen() is set to millis() during boot (on plane). 0 on rover/copter
         -- So if it's less than 10000 assume no GCS packet received since boot
         if link_lost_for > (RCK_TIMEOUT:get() * 1000) and not gcs:get_high_latency_status() and gcs:last_seen() > 10000 then
@@ -824,10 +825,10 @@ function HLSatcom()
             hl2.failure_flags = hl2.failure_flags + 256 -- HL_FAILURE_FLAG_RC_RECEIVER
         end
 
-        hl2.heading = math.floor(wrap_360(math.deg(ahrs:get_yaw())) / 2)
+        hl2.heading = math.floor(wrap_360(math.deg(ahrs:get_yaw_rad())) / 2)
         hl2.throttle = math.floor(gcs:get_hud_throttle())
-        if ahrs:airspeed_estimate() ~= nil then
-            hl2.airspeed = math.abs(math.floor(ahrs:airspeed_estimate() * 5))
+        if ahrs:airspeed_EAS() ~= nil then
+            hl2.airspeed = math.abs(math.floor(ahrs:airspeed_EAS() * 5))
         end
         -- hl2.airspeed_sp = 0
         hl2.groundspeed = math.abs(math.floor(

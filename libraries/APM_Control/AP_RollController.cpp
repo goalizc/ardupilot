@@ -168,19 +168,9 @@ float AP_RollController::get_measured_rate() const
     return AP::ahrs().get_gyro().x;
 }
 
-float AP_RollController::get_airspeed() const
+bool AP_RollController::is_underspeed() const
 {
-    float aspeed;
-    if (!AP::ahrs().airspeed_estimate(aspeed)) {
-        // If no airspeed available use 0
-        aspeed = 0.0;
-    }
-    return aspeed;
-}
-
-bool AP_RollController::is_underspeed(const float aspeed) const
-{
-    return aspeed <= float(aparm.airspeed_min);
+    return get_airspeed() <= float(aparm.airspeed_min);
 }
 
 /*
@@ -202,14 +192,38 @@ float AP_RollController::get_servo_out(int32_t angle_err, float scaler, bool dis
     angle_err_deg = angle_err * 0.01;
     float desired_rate = angle_err_deg/ gains.tau;
 
-    // Limit the demanded roll rate
-    if (gains.rmax_pos && desired_rate < -gains.rmax_pos) {
-        desired_rate = - gains.rmax_pos;
-    } else if (gains.rmax_pos && desired_rate > gains.rmax_pos) {
-        desired_rate = gains.rmax_pos;
+    /*
+      prevent indecision in the roll controller when target roll is
+      close to 180 degrees from the current roll
+     */
+    const float indecision_threshold_deg = 160;
+    const float last_desired_rate = _pid_info.target;
+    const float abs_angle_err_deg = fabsf(angle_err_deg);
+    if (abs_angle_err_deg > indecision_threshold_deg &&
+        angle_err_deg <= 180) {
+        if (desired_rate * last_desired_rate < 0) {
+            desired_rate = -desired_rate;
+            // increase the desired rate in proportion to the extra
+            // angle we are requesting
+            const float new_angle_err_deg = abs_angle_err_deg + (180 - abs_angle_err_deg)*2;
+            desired_rate *= new_angle_err_deg / abs_angle_err_deg;
+        }
     }
 
-    return _get_rate_out(desired_rate, scaler, disable_integrator, get_airspeed(), ground_mode);
+    if (!in_recovery) {
+        // Limit the demanded roll rate. When we are in a VTOL
+        // recovery we don't apply the limit
+        if (gains.rmax_pos && desired_rate < -gains.rmax_pos) {
+            desired_rate = - gains.rmax_pos;
+        } else if (gains.rmax_pos && desired_rate > gains.rmax_pos) {
+            desired_rate = gains.rmax_pos;
+        }
+    }
+
+    // the in_recovery flag is single loop only
+    in_recovery = false;
+
+    return _get_rate_out(desired_rate, scaler, disable_integrator, ground_mode);
 }
 
 /*

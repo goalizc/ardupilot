@@ -39,8 +39,8 @@ const AP_Param::GroupInfo AP_Mission::var_info[] = {
 
     // @Param: OPTIONS
     // @DisplayName: Mission options bitmask
-    // @Description: Bitmask of what options to use in missions.
-    // @Bitmask: 0:Clear Mission on reboot, 1:Use distance to land calc on battery failsafe,2:ContinueAfterLand
+    // @Description: Bitmask of what options to use in missions. If the DontZeroCounter counter option is set than on completion of a jump loop the counter is left at zero, so the jump will not happen again if the loop is re-entered.
+    // @Bitmask: 0:Clear Mission on reboot, 1:Use distance to land calc on battery failsafe,2:ContinueAfterLand, 3:DontZeroCounter
     // @Bitmask{Copter}: 0:Clear Mission on reboot, 2:ContinueAfterLand
     // @Bitmask{Rover, Sub}: 0:Clear Mission on reboot
     // @User: Advanced
@@ -379,6 +379,9 @@ bool AP_Mission::verify_command(const Mission_Command& cmd)
     case MAV_CMD_DO_DIGICAM_CONFIGURE:
     case MAV_CMD_DO_DIGICAM_CONTROL:
     case MAV_CMD_DO_SET_CAM_TRIGG_DIST:
+#if AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
+    case MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET:
+#endif  // AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
     case MAV_CMD_DO_PARACHUTE:
     case MAV_CMD_DO_SEND_SCRIPT_MESSAGE:
     case MAV_CMD_DO_SPRAYER:
@@ -480,6 +483,10 @@ bool AP_Mission::start_command(const Mission_Command& cmd)
         return command_do_set_repeat_dist(cmd);
     case MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW:
         return start_command_do_gimbal_manager_pitchyaw(cmd);
+#if AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
+    case MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET:
+        return start_command_do_set_roi_wpnext_offset(cmd);
+#endif  // AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
     case MAV_CMD_JUMP_TAG:
         _jump_tag.tag = cmd.content.jump.target;
         _jump_tag.age = 1;
@@ -911,10 +918,18 @@ bool AP_Mission::stored_in_location(uint16_t id)
     case MAV_CMD_DO_RETURN_PATH_START:
     case MAV_CMD_DO_LAND_START:
     case MAV_CMD_DO_GO_AROUND:
+    case MAV_CMD_DO_SET_ROI_LOCATION:
     case MAV_CMD_DO_SET_ROI:
     case MAV_CMD_NAV_VTOL_TAKEOFF:
     case MAV_CMD_NAV_VTOL_LAND:
     case MAV_CMD_NAV_PAYLOAD_PLACE:
+    case MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION:
+    case MAV_CMD_NAV_FENCE_POLYGON_VERTEX_EXCLUSION:
+    case MAV_CMD_NAV_FENCE_CIRCLE_INCLUSION:
+    case MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION:
+    case MAV_CMD_NAV_FENCE_RETURN_POINT:
+    case MAV_CMD_NAV_RALLY_POINT:
+    case MAV_CMD_NAV_ARC_WAYPOINT:
         return true;
     default:
         return false;
@@ -1018,6 +1033,9 @@ MAV_MISSION_RESULT AP_Mission::sanity_check_params(const mavlink_mission_item_in
     case MAV_CMD_NAV_TAKEOFF:
         nan_mask = ~(1 << 3); // param 4 can be nan
         break;
+    case MAV_CMD_NAV_ARC_WAYPOINT:
+        nan_mask = ~((1 << 1) | (1 << 2) | (1 << 3)); // param 2,3 & 4 can be nan
+        break;
     case MAV_CMD_NAV_VTOL_TAKEOFF:
         nan_mask = ~(1 << 3); // param 4 can be nan
         break;
@@ -1089,7 +1107,11 @@ MAV_MISSION_RESULT AP_Mission::mavlink_int_to_mission_cmd(const mavlink_mission_
         cmd.p1 = (passby << 8) | (acp & 0x00FF);
 #else
         // delay at waypoint in seconds (this is for copters???)
-        cmd.p1 = packet.param1;
+        // reject invalid param1 values to prevent floating point exception
+        if (packet.param1 < 0 || packet.param1 > UINT16_MAX) {
+            return MAV_MISSION_INVALID_PARAM1;
+        }
+        cmd.p1 = (uint16_t)packet.param1;
 #endif
     }
     break;
@@ -1157,6 +1179,11 @@ MAV_MISSION_RESULT AP_Mission::mavlink_int_to_mission_cmd(const mavlink_mission_
         cmd.p1 = fabsf(packet.param2);                  // param2 is radius in meters
         cmd.content.location.loiter_ccw = (packet.param2 < 0);
         cmd.content.location.loiter_xtrack = (packet.param4 > 0); // 0 to xtrack from center of waypoint, 1 to xtrack from tangent exit location
+        break;
+
+    case MAV_CMD_NAV_ARC_WAYPOINT:                      // MAV ID: 36
+        cmd.content.location.loiter_ccw = is_negative(packet.param1); // re-use loiter_cw for arc direction
+        cmd.p1 = fabsf(packet.param1);                  // arc angle in deg
         break;
 
     case MAV_CMD_NAV_SPLINE_WAYPOINT:                   // MAV ID: 82
@@ -1243,6 +1270,11 @@ MAV_MISSION_RESULT AP_Mission::mavlink_int_to_mission_cmd(const mavlink_mission_
     case MAV_CMD_DO_GO_AROUND:                          // MAV ID: 191
         break;
 
+    case MAV_CMD_DO_SET_ROI_LOCATION:                   // MAV ID: 195
+    case MAV_CMD_DO_SET_ROI_NONE:                       // MAV ID: 197
+        cmd.p1 = packet.param1;                         // gimbal device id
+        break;
+
     case MAV_CMD_DO_SET_ROI:                            // MAV ID: 201
         cmd.p1 = packet.param1;                         // 0 = no roi, 1 = next waypoint, 2 = waypoint number, 3 = fixed location, 4 = given target (not supported)
         break;
@@ -1276,6 +1308,7 @@ MAV_MISSION_RESULT AP_Mission::mavlink_int_to_mission_cmd(const mavlink_mission_
     case MAV_CMD_DO_SET_CAM_TRIGG_DIST:                 // MAV ID: 206
         cmd.content.cam_trigg_dist.meters = packet.param1;  // distance between camera shots in meters
         cmd.content.cam_trigg_dist.trigger = packet.param3; // when enabled, camera triggers once immediately
+        cmd.content.cam_trigg_dist.camera_id = packet.param4; // which camera to trigger
         break;
 
     case MAV_CMD_DO_FENCE_ENABLE:                       // MAV ID: 207
@@ -1421,6 +1454,7 @@ MAV_MISSION_RESULT AP_Mission::mavlink_int_to_mission_cmd(const mavlink_mission_
     case MAV_CMD_SET_CAMERA_ZOOM:
         cmd.content.set_camera_zoom.zoom_type = packet.param1;
         cmd.content.set_camera_zoom.zoom_value = packet.param2;
+        cmd.content.set_camera_zoom.camera_id = packet.param3;
         break;
 
     case MAV_CMD_SET_CAMERA_FOCUS:
@@ -1441,6 +1475,15 @@ MAV_MISSION_RESULT AP_Mission::mavlink_int_to_mission_cmd(const mavlink_mission_
     case MAV_CMD_VIDEO_STOP_CAPTURE:
         cmd.content.video_stop_capture.video_stream_id = packet.param1;
         break;
+
+#if AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
+    case MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET:
+        cmd.content.wpnext_offset.gimbal_id = packet.param1;
+        cmd.content.wpnext_offset.roll_offset_cd = packet.y * 100;
+        cmd.content.wpnext_offset.pitch_offset_cd = packet.x * 100;
+        cmd.content.wpnext_offset.yaw_offset_cd = packet.z * 100;
+        break;
+#endif  // AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
 
     default:
         // unrecognised command
@@ -1673,6 +1716,11 @@ bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& c
         packet.param4 = cmd.content.location.loiter_xtrack; // 0 to xtrack from center of waypoint, 1 to xtrack from tangent exit location
         break;
 
+    case MAV_CMD_NAV_ARC_WAYPOINT: {                    // MAV ID: 36
+        const float sign = cmd.content.location.loiter_ccw == 0 ? 1.0 : -1.0; // Mavlink command specifies positiive is CW
+        packet.param1 = float(cmd.p1) * sign;
+        break;
+    }
     case MAV_CMD_NAV_SPLINE_WAYPOINT:                   // MAV ID: 82
         packet.param1 = cmd.p1;                         // delay at waypoint in seconds
         break;
@@ -1753,6 +1801,11 @@ bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& c
     case MAV_CMD_DO_GO_AROUND:                          // MAV ID: 191
         break;
 
+    case MAV_CMD_DO_SET_ROI_LOCATION:                   // MAV ID: 195
+    case MAV_CMD_DO_SET_ROI_NONE:                       // MAV ID: 197
+        packet.param1 = cmd.p1;                         // gimbal device id
+        break;
+
     case MAV_CMD_DO_SET_ROI:                            // MAV ID: 201
         packet.param1 = cmd.p1;                         // 0 = no roi, 1 = next waypoint, 2 = waypoint number, 3 = fixed location, 4 = given target (not supported)
         break;
@@ -1786,6 +1839,7 @@ bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& c
     case MAV_CMD_DO_SET_CAM_TRIGG_DIST:                 // MAV ID: 206
         packet.param1 = cmd.content.cam_trigg_dist.meters;  // distance between camera shots in meters
         packet.param3 = cmd.content.cam_trigg_dist.trigger; // when enabled, camera triggers once immediately
+        packet.param4 = cmd.content.cam_trigg_dist.camera_id; // which camera to trigger
         break;
 
     case MAV_CMD_DO_FENCE_ENABLE:                       // MAV ID: 207
@@ -1933,6 +1987,7 @@ bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& c
     case MAV_CMD_SET_CAMERA_ZOOM:
         packet.param1 = cmd.content.set_camera_zoom.zoom_type;
         packet.param2 = cmd.content.set_camera_zoom.zoom_value;
+        packet.param3 = cmd.content.set_camera_zoom.camera_id;
         break;
 
     case MAV_CMD_SET_CAMERA_FOCUS:
@@ -1953,6 +2008,15 @@ bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& c
     case MAV_CMD_VIDEO_STOP_CAPTURE:
         packet.param1 = cmd.content.video_stop_capture.video_stream_id;
         break;
+
+#if AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
+    case MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET:
+        packet.param1 = cmd.content.wpnext_offset.gimbal_id;
+        packet.y = cmd.content.wpnext_offset.roll_offset_cd * 0.01;
+        packet.x = cmd.content.wpnext_offset.pitch_offset_cd * 0.01;
+        packet.z = cmd.content.wpnext_offset.yaw_offset_cd * 0.01;
+        break;
+#endif  // AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
 
     default:
         // unrecognised command
@@ -2209,6 +2273,19 @@ bool AP_Mission::get_next_cmd(uint16_t start_index, Mission_Command& cmd, bool i
                 // continue searching from jump target
                 cmd_index = temp_cmd.content.jump.target;
             } else {
+                if (increment_jump_num_times_if_found && !option_is_set(Option::DONT_ZERO_COUNTER)) {
+                    /*
+                      when we have completed a jump loop reset the counter
+                      so if the user changes WP back to restart the loop
+                      they get the count again
+                    */
+                    for (uint8_t i=0; i<AP_MISSION_MAX_NUM_DO_JUMP_COMMANDS; i++) {
+                        if (_jump_tracking[i].index == cmd_index) {
+                            _jump_tracking[i].num_times_run = 0;
+                            break;
+                        }
+                    }
+                }
                 // jump has been run specified number of times so move search to next command in mission
                 cmd_index++;
             }
@@ -2758,6 +2835,8 @@ const char *AP_Mission::Mission_Command::type() const
         return "WP";
     case MAV_CMD_NAV_SPLINE_WAYPOINT:
         return "SplineWP";
+    case MAV_CMD_NAV_ARC_WAYPOINT:
+        return "ArcWP";
     case MAV_CMD_NAV_RETURN_TO_LAUNCH:
         return "RTL";
     case MAV_CMD_NAV_LOITER_UNLIM:
@@ -2794,6 +2873,10 @@ const char *AP_Mission::Mission_Command::type() const
         return "DigiCamCtrl";
     case MAV_CMD_DO_SET_CAM_TRIGG_DIST:
         return "SetCamTrigDst";
+    case MAV_CMD_DO_SET_ROI_LOCATION:
+        return "SetROILocation";
+    case MAV_CMD_DO_SET_ROI_NONE:
+        return "SetROINone";
     case MAV_CMD_DO_SET_ROI:
         return "SetROI";
     case MAV_CMD_DO_SET_REVERSE:
@@ -2884,6 +2967,10 @@ const char *AP_Mission::Mission_Command::type() const
         return "VideoStartCapture";
     case MAV_CMD_VIDEO_STOP_CAPTURE:
         return "VideoStopCapture";
+#if AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
+    case MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET:
+        return "ROIWPNextOffset";
+#endif  // AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
     default:
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
         AP_HAL::panic("Mission command with ID %u has no string", id);
@@ -3071,7 +3158,7 @@ bool AP_Mission::calc_rewind_pos(Mission_Command& rewind_cmd)
 
     // calculate the resume wp position
     rewind_cmd.content.location.offset(dist_vec.x * leg_percent, dist_vec.y * leg_percent);
-    rewind_cmd.content.location.alt -= dist_vec.z * leg_percent * 100; //(cm)
+    rewind_cmd.content.location.offset_up_m(-dist_vec.z * leg_percent);
 
     // The rewind_cmd.index has the index of the 'last passed wp' from the history array.  This ensures that the mission order
     // continues as planned without further intervention.  The resume wp is not written to memory so will not perminantely change the mission.

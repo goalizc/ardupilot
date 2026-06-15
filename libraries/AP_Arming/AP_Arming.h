@@ -19,30 +19,34 @@ public:
 
     static AP_Arming *get_singleton();
 
+    __INITFUNC__ void init(void);
+
     void update();
 
-    enum ArmingChecks {
-        ARMING_CHECK_ALL         = (1U << 0),
-        ARMING_CHECK_BARO        = (1U << 1),
-        ARMING_CHECK_COMPASS     = (1U << 2),
-        ARMING_CHECK_GPS         = (1U << 3),
-        ARMING_CHECK_INS         = (1U << 4),
-        ARMING_CHECK_PARAMETERS  = (1U << 5),
-        ARMING_CHECK_RC          = (1U << 6),
-        ARMING_CHECK_VOLTAGE     = (1U << 7),
-        ARMING_CHECK_BATTERY     = (1U << 8),
-        ARMING_CHECK_AIRSPEED    = (1U << 9),
-        ARMING_CHECK_LOGGING     = (1U << 10),
-        ARMING_CHECK_SWITCH      = (1U << 11),
-        ARMING_CHECK_GPS_CONFIG  = (1U << 12),
-        ARMING_CHECK_SYSTEM      = (1U << 13),
-        ARMING_CHECK_MISSION     = (1U << 14),
-        ARMING_CHECK_RANGEFINDER = (1U << 15),
-        ARMING_CHECK_CAMERA      = (1U << 16),
-        ARMING_CHECK_AUX_AUTH    = (1U << 17),
-        ARMING_CHECK_VISION      = (1U << 18),
-        ARMING_CHECK_FFT         = (1U << 19),
-        ARMING_CHECK_OSD         = (1U << 20),
+    enum class Check {
+        // 0 used to be ALL, though it could be reused as the SKIPCHK conversion
+        // never sets it. check_mask would also need updating.
+        BARO        = (1U << 1),
+        COMPASS     = (1U << 2),
+        GPS         = (1U << 3),
+        INS         = (1U << 4),
+        PARAMETERS  = (1U << 5),
+        RC          = (1U << 6),
+        VOLTAGE     = (1U << 7),
+        BATTERY     = (1U << 8),
+        AIRSPEED    = (1U << 9),
+        LOGGING     = (1U << 10),
+        SWITCH      = (1U << 11),
+        GPS_CONFIG  = (1U << 12),
+        SYSTEM      = (1U << 13),
+        MISSION     = (1U << 14),
+        RANGEFINDER = (1U << 15),
+        CAMERA      = (1U << 16),
+        AUX_AUTH    = (1U << 17),
+        VISION      = (1U << 18),
+        FFT         = (1U << 19),
+        OSD         = (1U << 20),
+        CHECK_LAST  = (1U << 21), // must be last
     };
 
     enum class Method {
@@ -82,16 +86,19 @@ public:
         DEADRECKON_FAILSAFE = 33, // only disarm uses this...
         BLACKBOX = 34,
         DDS = 35,
+        AUTO_ARM_ONCE = 36,
+        TURTLE_MODE = 37,
+        TOYMODE = 38,
         UNKNOWN = 100,
     };
 
     enum class Required {
         NO           = 0,
         YES_MIN_PWM  = 1,
-        YES_ZERO_PWM = 2
+        YES_ZERO_PWM = 2,
+        YES_AUTO_ARM_MIN_PWM = 3,
+        YES_AUTO_ARM_ZERO_PWM = 4,
     };
-
-    void init(void);
 
     // these functions should not be used by Copter which holds the armed state in the motors library
     Required arming_required() const;
@@ -106,9 +113,14 @@ public:
 
     // get bitmask of enabled checks
     uint32_t get_enabled_checks() const;
+    // return if all checks are enabled, enabling all changes arming logic slightly
+    bool all_checks_enabled() const;
+    // return if all checks are set as skipped, skipping all changes arming logic slightly
+    bool should_skip_all_checks() const { return get_enabled_checks() == 0; }
 
     // pre_arm_checks() is virtual so it can be modified in a vehicle specific subclass
     virtual bool pre_arm_checks(bool report);
+    bool get_last_prearm_checks_result() const { return last_prearm_checks_result; }
 
     // some arming checks have side-effects, or require some form of state
     // change to have occurred, and thus should not be done as pre-arm
@@ -149,6 +161,7 @@ public:
     enum class Option : int32_t {
         DISABLE_PREARM_DISPLAY             = (1U << 0),
         DISABLE_STATUSTEXT_ON_STATE_CHANGE = (1U << 1),
+        SKIP_IMU_CONSISTENCY_ICE_RUNNING   = (1U << 2),
     };
     bool option_enabled(Option option) const {
         return (_arming_options & uint32_t(option)) != 0;
@@ -169,7 +182,7 @@ protected:
 
     // Parameters
     AP_Enum<Required>       require;
-    AP_Int32                checks_to_perform;      // bitmask for which checks are required
+    AP_Int32                checks_to_skip; // bitmask for which checks should be skipped
     AP_Float                accel_error_threshold;
     AP_Int8                 _rudder_arming;
     AP_Int32                _required_mission_items;
@@ -264,13 +277,13 @@ protected:
     bool visodom_checks(bool report) const;
     bool disarm_switch_checks(bool report) const;
 
-    // mandatory checks that cannot be bypassed.  This function will only be called if ARMING_CHECK is zero or arming forced
+    // mandatory checks that cannot be bypassed.  This function will only be called if ARMING_SKIPCHK skips all or arming forced
     virtual bool mandatory_checks(bool report);
 
     // returns true if a particular check is enabled
-    bool check_enabled(const enum AP_Arming::ArmingChecks check) const;
+    bool check_enabled(const AP_Arming::Check check) const;
     // handle the case where a check fails
-    void check_failed(const enum AP_Arming::ArmingChecks check, bool report, const char *fmt, ...) const FMT_PRINTF(4, 5);
+    void check_failed(const AP_Arming::Check check, bool report, const char *fmt, ...) const FMT_PRINTF(4, 5);
     void check_failed(bool report, const char *fmt, ...) const FMT_PRINTF(3, 4);
 
     void Log_Write_Arm(bool forced, AP_Arming::Method method);

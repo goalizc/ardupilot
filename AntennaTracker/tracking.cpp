@@ -16,7 +16,7 @@ void Tracker::update_vehicle_pos_estimate()
         float north_offset = vehicle.vel.x * dt;
         float east_offset = vehicle.vel.y * dt;
         vehicle.location_estimate.offset(north_offset, east_offset);
-    	vehicle.location_estimate.alt += vehicle.vel.z * 100.0f * dt;
+    	vehicle.location_estimate.offset_up_m(vehicle.vel.z * dt);
         // set valid_location flag
         vehicle.location_valid = true;
     } else {
@@ -103,6 +103,9 @@ void Tracker::update_tracking(void)
     if (hal.util->safety_switch_state() == AP_HAL::Util::SAFETY_DISARMED) {
         return;
     }
+
+    hal.rcout->cork();
+
     // do not move if we are not armed:
     if (!hal.util->get_soft_armed()) {
         switch ((PWMDisarmed)g.disarm_pwm.get()) {
@@ -123,6 +126,9 @@ void Tracker::update_tracking(void)
     // convert servo_out to radio_out and send to servo
     SRV_Channels::calc_pwm();
     SRV_Channels::output_ch_all();
+
+    hal.rcout->push();
+
     return;
 }
 

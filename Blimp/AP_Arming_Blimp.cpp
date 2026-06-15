@@ -16,6 +16,11 @@ bool AP_Arming_Blimp::run_pre_arm_checks(bool display_failure)
         return true;
     }
 
+    if (!hal.scheduler->is_system_initialized()) {
+        check_failed(display_failure, "System not initialised");
+        return false;
+    }
+
     // check if motor interlock and Emergency Stop aux switches are used
     // at the same time.  This cannot be allowed.
     if (rc().find_channel_for_option(RC_Channel::AUX_FUNC::MOTOR_INTERLOCK) &&
@@ -25,10 +30,14 @@ bool AP_Arming_Blimp::run_pre_arm_checks(bool display_failure)
     }
 
     // if pre arm checks are disabled run only the mandatory checks
-    if (checks_to_perform == 0) {
+    if (should_skip_all_checks()) {
         return mandatory_checks(display_failure);
     }
 
+#pragma clang diagnostic push
+#if defined(__clang_major__) && __clang_major__ >= 14
+#pragma clang diagnostic ignored "-Wbitwise-instead-of-logical"
+#endif
     return parameter_checks(display_failure)
 #if AP_FENCE_ENABLED
            & fence_checks(display_failure)
@@ -37,6 +46,7 @@ bool AP_Arming_Blimp::run_pre_arm_checks(bool display_failure)
            & gcs_failsafe_check(display_failure)
            & alt_checks(display_failure)
            & AP_Arming::pre_arm_checks(display_failure);
+#pragma clang diagnostic pop
 }
 
 bool AP_Arming_Blimp::barometer_checks(bool display_failure)
@@ -47,15 +57,17 @@ bool AP_Arming_Blimp::barometer_checks(bool display_failure)
 
     bool ret = true;
     // check Baro
-    if (check_enabled(ARMING_CHECK_BARO)) {
+    if (check_enabled(Check::BARO)) {
         // Check baro & inav alt are within 1m if EKF is operating in an absolute position mode.
         // Do not check if intending to operate in a ground relative height mode as EKF will output a ground relative height
         // that may differ from the baro height due to baro drift.
-        nav_filter_status filt_status = blimp.inertial_nav.get_filter_status();
-        bool using_baro_ref = (!filt_status.flags.pred_horiz_pos_rel && filt_status.flags.pred_horiz_pos_abs);
+        const auto &ahrs = AP::ahrs();
+        const bool using_baro_ref = !ahrs.has_status(AP_AHRS::Status::PRED_HORIZ_POS_REL) && ahrs.has_status(AP_AHRS::Status::PRED_HORIZ_POS_ABS);
+        float pos_d_m = 0;
+        UNUSED_RESULT(AP::ahrs().get_relative_position_D_origin_float(pos_d_m));
         if (using_baro_ref) {
-            if (fabsf(blimp.inertial_nav.get_position_z_up_cm() - blimp.baro_alt) > PREARM_MAX_ALT_DISPARITY_CM) {
-                check_failed(ARMING_CHECK_BARO, display_failure, "Altitude disparity");
+            if (fabsf(-pos_d_m * 100.0 - blimp.baro_alt) > PREARM_MAX_ALT_DISPARITY_CM) {
+                check_failed(Check::BARO, display_failure, "Altitude disparity");
                 ret = false;
             }
         }
@@ -67,11 +79,11 @@ bool AP_Arming_Blimp::ins_checks(bool display_failure)
 {
     bool ret = AP_Arming::ins_checks(display_failure);
 
-    if (check_enabled(ARMING_CHECK_INS)) {
+    if (check_enabled(Check::INS)) {
 
         // get ekf attitude (if bad, it's usually the gyro biases)
         if (!pre_arm_ekf_attitude_check()) {
-            check_failed(ARMING_CHECK_INS, display_failure, "EKF attitude is bad");
+            check_failed(Check::INS, display_failure, "EKF attitude is bad");
             ret = false;
         }
     }
@@ -86,9 +98,9 @@ bool AP_Arming_Blimp::board_voltage_checks(bool display_failure)
     }
 
     // check battery voltage
-    if (check_enabled(ARMING_CHECK_VOLTAGE)) {
+    if (check_enabled(Check::VOLTAGE)) {
         if (blimp.battery.has_failsafed()) {
-            check_failed(ARMING_CHECK_VOLTAGE, display_failure, "Battery failsafe");
+            check_failed(Check::VOLTAGE, display_failure, "Battery failsafe");
             return false;
         }
 
@@ -104,13 +116,13 @@ bool AP_Arming_Blimp::board_voltage_checks(bool display_failure)
 bool AP_Arming_Blimp::parameter_checks(bool display_failure)
 {
     // check various parameter values
-    if (check_enabled(ARMING_CHECK_PARAMETERS)) {
+    if (check_enabled(Check::PARAMETERS)) {
 
         // failsafe parameter checks
         if (blimp.g.failsafe_throttle) {
             // check throttle min is above throttle failsafe trigger and that the trigger is above ppm encoder's loss-of-signal value of 900
             if (blimp.channel_up->get_radio_min() <= blimp.g.failsafe_throttle_value+10 || blimp.g.failsafe_throttle_value < 910) {
-                check_failed(ARMING_CHECK_PARAMETERS, display_failure, "Check FS_THR_VALUE");
+                check_failed(Check::PARAMETERS, display_failure, "Check FS_THR_VALUE");
                 return false;
             }
         }
@@ -129,7 +141,7 @@ bool AP_Arming_Blimp::motor_checks(bool display_failure)
     }
 
     // further checks enabled with parameters
-    if (!check_enabled(ARMING_CHECK_PARAMETERS)) {
+    if (!check_enabled(Check::PARAMETERS)) {
         return true;
     }
 
@@ -161,14 +173,14 @@ bool AP_Arming_Blimp::gps_checks(bool display_failure)
     }
 
     // return true immediately if gps check is disabled
-    if (!check_enabled(ARMING_CHECK_GPS)) {
+    if (!check_enabled(Check::GPS)) {
         AP_Notify::flags.pre_arm_gps_check = true;
         return true;
     }
 
     // warn about hdop separately - to prevent user confusion with no gps lock
     if (blimp.gps.get_hdop() > blimp.g.gps_hdop_good) {
-        check_failed(ARMING_CHECK_GPS, display_failure, "High GPS HDOP");
+        check_failed(Check::GPS, display_failure, "High GPS HDOP");
         AP_Notify::flags.pre_arm_gps_check = false;
         return false;
     }
@@ -187,10 +199,7 @@ bool AP_Arming_Blimp::gps_checks(bool display_failure)
 // check ekf attitude is acceptable
 bool AP_Arming_Blimp::pre_arm_ekf_attitude_check()
 {
-    // get ekf filter status
-    nav_filter_status filt_status = blimp.inertial_nav.get_filter_status();
-
-    return filt_status.flags.attitude;
+    return AP::ahrs().has_status(AP_AHRS::Status::ATTITUDE_VALID);
 }
 
 // performs mandatory gps checks.  returns true if passed
@@ -261,7 +270,7 @@ bool AP_Arming_Blimp::arm_checks(AP_Arming::Method method)
     return AP_Arming::arm_checks(method);
 }
 
-// mandatory checks that will be run if ARMING_CHECK is zero or arming forced
+// mandatory checks that will be run if ARMING_SKIPCHK skips all or arming forced
 bool AP_Arming_Blimp::mandatory_checks(bool display_failure)
 {
     // call mandatory gps checks and update notify status because regular gps checks will not run
@@ -316,7 +325,7 @@ bool AP_Arming_Blimp::arm(const AP_Arming::Method method, const bool do_arming_c
         AP::notify().update();
     }
 
-    send_arm_disarm_statustext("Arming motors"); //MIR kept in - usually only in SITL
+    send_arm_disarm_statustext("Arming motors"); //Kept in - usually only in SITL
 
     auto &ahrs = AP::ahrs();
 
@@ -326,17 +335,11 @@ bool AP_Arming_Blimp::arm(const AP_Arming::Method method, const bool do_arming_c
         // Reset EKF altitude if home hasn't been set yet (we use EKF altitude as substitute for alt above home)
         ahrs.resetHeightDatum();
         LOGGER_WRITE_EVENT(LogEvent::EKF_ALT_RESET);
-
-        // we have reset height, so arming height is zero
-        blimp.arming_altitude_m = 0;
     } else if (!ahrs.home_is_locked()) {
         // Reset home position if it has already been set before (but not locked)
         if (!blimp.set_home_to_current_location(false)) {
             // ignore failure
         }
-
-        // remember the height when we armed
-        blimp.arming_altitude_m = blimp.inertial_nav.get_position_z_up_cm() * 0.01;
     }
 
     hal.util->set_soft_armed(true);
@@ -373,11 +376,17 @@ bool AP_Arming_Blimp::disarm(const AP_Arming::Method method, bool do_disarm_chec
         return true;
     }
 
+    if (method == AP_Arming::Method::RUDDER) {
+        if (!blimp.flightmode->has_manual_throttle() && !blimp.ap.land_complete) {
+            return false;
+        }
+    }
+
     if (!AP_Arming::disarm(method, do_disarm_checks)) {
         return false;
     }
 
-    send_arm_disarm_statustext("Disarming motors"); //MIR keeping in - usually only in SITL
+    send_arm_disarm_statustext("Disarming motors"); //Keeping in - usually only in SITL
 
     auto &ahrs = AP::ahrs();
 

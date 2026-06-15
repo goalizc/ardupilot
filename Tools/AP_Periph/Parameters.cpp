@@ -113,8 +113,8 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
 
 #ifdef HAL_GPIO_PIN_GPIO_CAN1_TERM
     // @Param: CAN_TERMINATE
-    // @DisplayName: Enable CAN software temination in this node
-    // @Description: Enable CAN software temination in this node
+    // @DisplayName: Enable CAN software termination in this node
+    // @Description: Enable CAN software termination in this node
     // @Values: 0:Disabled,1:Enabled
     // @User: Advanced
     // @RebootRequired: True
@@ -283,7 +283,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     GSCALAR(baro_enable, "BARO_ENABLE", AP_PERIPH_BARO_ENABLE_DEFAULT),
 #endif
 
-#ifdef AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY
+#if AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY
     // @Param: LED_BRIGHTNESS
     // @DisplayName: LED Brightness
     // @Description: Select the RGB LED brightness level.
@@ -305,7 +305,8 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @Param: RNGFND_BAUDRATE
     // @DisplayName: Rangefinder serial baudrate
     // @Description: Rangefinder serial baudrate.
-    // @Values: 1:1200,2:2400,4:4800,9:9600,19:19200,38:38400,57:57600,111:111100,115:115200,230:230400,256:256000,460:460800,500:500000,921:921600,1500:1500000
+    // @Values: 1200:1200,2400:2400,4800:4800,9600:9600,19200:19200,38400:38400,57600:57600,111100:111100,115200:115200,230400:230400,256000:256000,460800:460800,500000:500000,921600:921600,1500000:1500000
+    // @Range: 1200 20000000
     // @Increment: 1
     // @User: Standard
     // @RebootRequired: True
@@ -322,12 +323,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
 
 #if RANGEFINDER_MAX_INSTANCES > 1
     // @Param: RNGFND2_BAUDRATE
-    // @DisplayName: Rangefinder serial baudrate
-    // @Description: Rangefinder serial baudrate.
-    // @Values: 1:1200,2:2400,4:4800,9:9600,19:19200,38:38400,57:57600,111:111100,115:115200,230:230400,256:256000,460:460800,500:500000,921:921600,1500:1500000
-    // @Increment: 1
-    // @User: Standard
-    // @RebootRequired: True
+    // @CopyFieldsFrom: RNGFND_BAUDRATE
     GARRAY(rangefinder_baud, 1, "RNGFND2_BAUDRATE", HAL_PERIPH_RANGEFINDER_BAUDRATE_DEFAULT),
 
     // @Param: RNGFND2_PORT
@@ -357,12 +353,9 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
 
 #if AP_PERIPH_ADSB_ENABLED
     // @Param: ADSB_BAUDRATE
+    // @CopyFieldsFrom: RNGFND_BAUDRATE
     // @DisplayName: ADSB serial baudrate
     // @Description: ADSB serial baudrate.
-    // @Values: 1:1200,2:2400,4:4800,9:9600,19:19200,38:38400,57:57600,111:111100,115:115200,230:230400,256:256000,460:460800,500:500000,921:921600,1500:1500000
-    // @Increment: 1
-    // @User: Standard
-    // @RebootRequired: True
     GSCALAR(adsb_baudrate, "ADSB_BAUDRATE", HAL_PERIPH_ADSB_BAUD_DEFAULT),
 
     // @Param: ADSB_PORT
@@ -491,14 +484,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     GSCALAR(log_bitmask,    "LOG_BITMASK",          4),
 #endif
 
-#if HAL_GCS_ENABLED
-    // @Param: SYSID_THISMAV
-    // @DisplayName: MAVLink system ID of this vehicle
-    // @Description: Allows setting an individual system id for this vehicle to distinguish it from others on the same network
-    // @Range: 1 255
-    // @User: Advanced
-    GSCALAR(sysid_this_mav,         "SYSID_THISMAV",  MAV_SYSTEM_ID),
-#endif
+    // SYSID_THISMAV was here
 
 #if HAL_GCS_ENABLED || defined(HAL_PERIPH_SHOW_SERIAL_MANAGER_PARAMS)
     // @Group: SERIAL
@@ -520,12 +506,9 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
 
 #if AP_PERIPH_EFI_ENABLED
     // @Param: EFI_BAUDRATE
+    // @CopyFieldsFrom: RNGFND_BAUDRATE
     // @DisplayName: EFI serial baudrate
     // @Description: EFI  serial baudrate.
-    // @Values: 1:1200,2:2400,4:4800,9:9600,19:19200,38:38400,57:57600,111:111100,115:115200,230:230400,256:256000,460:460800,500:500000,921:921600,1500:1500000
-    // @Increment: 1
-    // @User: Standard
-    // @RebootRequired: True
     GSCALAR(efi_baudrate, "EFI_BAUDRATE", HAL_PERIPH_EFI_BAUDRATE_DEFAULT),
 
     // @Param: EFI_PORT
@@ -545,12 +528,9 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
 
 #if AP_PERIPH_PROXIMITY_ENABLED
     // @Param: PRX_BAUDRATE
+    // @CopyFieldsFrom: RNGFND_BAUDRATE
     // @DisplayName: Proximity Sensor serial baudrate
     // @Description: Proximity Sensor serial baudrate.
-    // @Values: 1:1200,2:2400,4:4800,9:9600,19:19200,38:38400,57:57600,111:111100,115:115200,230:230400,256:256000,460:460800,500:500000,921:921600,1500:1500000
-    // @Increment: 1
-    // @User: Standard
-    // @RebootRequired: True
     GSCALAR(proximity_baud, "PRX_BAUDRATE", HAL_PERIPH_RANGEFINDER_BAUDRATE_DEFAULT),
 
     // @Param: PRX_PORT
@@ -637,12 +617,24 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     GOBJECT(g_rcin, "RC",  Parameters_RCIN),
 #endif
 
+#if AP_PERIPH_ACTUATOR_TELEM_ENABLED
+    // @Group: ACT
+    // @Path: actuator_telem.cpp
+    GOBJECT(actuator_telem, "ACT", ActuatorTelem),
+#endif
+
 #if AP_PERIPH_BATTERY_BALANCE_ENABLED
     // @Group: BAL
     // @Path: batt_balance.cpp
     GOBJECT(battery_balance, "BAL",  BattBalance),
 #endif
 
+#if AP_PERIPH_BATTERY_TAG_ENABLED
+    // @Group: BTAG
+    // @Path: battery_tag.cpp
+    GOBJECT(battery_tag, "BTAG",  BatteryTag),
+#endif
+    
 #if AP_PERIPH_SERIAL_OPTIONS_ENABLED
     // @Group: UART
     // @Path: serial_options.cpp
@@ -650,7 +642,7 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
 #endif
     
     // NOTE: sim parameters should go last
-#if AP_SIM_ENABLED
+#if AP_SIM_PARAM_ENABLED
     // @Group: SIM_
     // @Path: ../libraries/SITL/SITL.cpp
     GOBJECT(sitl, "SIM_", SITL::SIM),
@@ -735,6 +727,39 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @Group: INS
     // @Path: ../libraries/AP_InertialSensor/AP_InertialSensor.cpp
     GOBJECT(imu, "INS", AP_InertialSensor),
+#endif
+
+#if AP_DAC_ENABLED
+    // @Group: DAC
+    // @Path: ../libraries/AP_DAC/AP_DAC.cpp
+    GOBJECT(dac, "DAC", AP_DAC),
+#endif
+
+#if HAL_GCS_ENABLED
+    // @Group: MAV
+    // @Path: ../libraries/GCS_MAVLink/GCS.cpp
+    GOBJECT(_gcs,           "MAV",  GCS),
+#endif
+
+#if AP_PERIPH_RC_OUT_ENABLED
+    // @Param: SRV_CMD_TIME_OUT
+    // @DisplayName: Servo Command Timeout
+    // @Description: This is the duration (ms) with which to hold the last driven servo command before timing out and zeroing the servo outputs. To disable zeroing of outputs in event of CAN loss, use 0. Use values greater than the expected duration between two CAN frames to ensure Periph is not starved of ESC Raw Commands.
+    // @Range: 0 10000
+    // @Units: ms
+    // @User: Advanced
+    GSCALAR(servo_command_timeout_ms, "SRV_CMD_TIME_OUT", 200),
+#endif
+
+#if AP_SERVO_TELEM_ENABLED
+    // @Param: SRV_TLM_MSG_RATE
+    // @DisplayName: Servo telemetry message rate
+    // @Description: This is the rate servo telem data is sent in Hz. Zero means no send. Each servo is sent in turn.
+    // @Units: Hz
+    // @Range: 0 200
+    // @Increment: 1
+    // @User: Standard
+    GSCALAR(servo_telem_msg_rate, "SRV_TLM_MSG_RATE", 20),
 #endif
 
     AP_VAREND

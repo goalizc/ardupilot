@@ -5,7 +5,7 @@
 bool AP_Arming_Rover::rc_calibration_checks(const bool display_failure)
 {
     // set rc-checks to success if RC checks are disabled
-    if (!check_enabled(ARMING_CHECK_RC)) {
+    if (!check_enabled(Check::RC)) {
         return true;
     }
 
@@ -20,11 +20,11 @@ bool AP_Arming_Rover::rc_calibration_checks(const bool display_failure)
         const char *channel_name = channel_names[i];
         // check if radio has been calibrated
         if (channel->get_radio_min() > RC_Channel::RC_CALIB_MIN_LIMIT_PWM) {
-            check_failed(ARMING_CHECK_RC, display_failure, "%s radio min too high", channel_name);
+            check_failed(Check::RC, display_failure, "%s radio min too high", channel_name);
             return false;
         }
         if (channel->get_radio_max() < RC_Channel::RC_CALIB_MAX_LIMIT_PWM) {
-            check_failed(ARMING_CHECK_RC, display_failure, "%s radio max too low", channel_name);
+            check_failed(Check::RC, display_failure, "%s radio max too low", channel_name);
             return false;
         }
     }
@@ -78,8 +78,13 @@ bool AP_Arming_Rover::pre_arm_checks(bool report)
         return true;
     }
 
-    //are arming checks disabled?
-    if (checks_to_perform == 0) {
+    if (!hal.scheduler->is_system_initialized()) {
+        check_failed(report, "System not initialised");
+        return false;
+    }
+
+    // are arming checks disabled?
+    if (should_skip_all_checks()) {
         return mandatory_checks(report);
     }
 
@@ -88,6 +93,10 @@ bool AP_Arming_Rover::pre_arm_checks(bool report)
         return false;
     }
 
+#pragma clang diagnostic push
+#if defined(__clang_major__) && __clang_major__ >= 14
+#pragma clang diagnostic ignored "-Wbitwise-instead-of-logical"
+#endif
     return (AP_Arming::pre_arm_checks(report)
             & motor_checks(report)
 #if AP_OAPATHPLANNER_ENABLED
@@ -95,12 +104,21 @@ bool AP_Arming_Rover::pre_arm_checks(bool report)
 #endif
             & parameter_checks(report)
             & mode_checks(report));
+#pragma clang diagnostic pop
 }
 
 bool AP_Arming_Rover::arm_checks(AP_Arming::Method method)
 {
-    //are arming checks disabled?
-    if (checks_to_perform == 0) {
+    if (method == AP_Arming::Method::RUDDER) {
+        // check if arming/disarming allowed from this mode
+        if (!rover.control_mode->allows_arming_from_transmitter()) {
+            check_failed(true, "Mode not rudder-armable");
+            return false;
+        }
+    }
+
+    // are arming checks disabled?
+    if (should_skip_all_checks()) {
         return true;
     }
     return AP_Arming::arm_checks(method);
@@ -108,11 +126,7 @@ bool AP_Arming_Rover::arm_checks(AP_Arming::Method method)
 
 void AP_Arming_Rover::update_soft_armed()
 {
-    hal.util->set_soft_armed(is_armed() &&
-                             hal.util->safety_switch_state() != AP_HAL::Util::SAFETY_DISARMED);
-#if HAL_LOGGING_ENABLED
-    AP::logger().set_vehicle_armed(hal.util->get_soft_armed());
-#endif
+    hal.util->set_soft_armed(is_armed());
 }
 
 /*
@@ -134,6 +148,11 @@ bool AP_Arming_Rover::arm(AP_Arming::Method method, const bool do_arming_checks)
     // save home heading for use in sail vehicles
     rover.g2.windvane.record_home_heading();
 
+#if HAL_LOGGING_ENABLED
+    // Tell logger it can start logging
+    AP::logger().set_vehicle_armed(true);
+#endif
+
     update_soft_armed();
 
     send_arm_disarm_statustext("Throttle armed");
@@ -146,6 +165,14 @@ bool AP_Arming_Rover::arm(AP_Arming::Method method, const bool do_arming_checks)
  */
 bool AP_Arming_Rover::disarm(const AP_Arming::Method method, bool do_disarm_checks)
 {
+    if (method == AP_Arming::Method::RUDDER) {
+        if (rover.g2.motors.active()) {
+            // can't emit a message here as full-rudder while driving
+            // is not uncommon
+            return false;
+        }
+    }
+
     if (!AP_Arming::disarm(method, do_disarm_checks)) {
         return false;
     }
@@ -153,6 +180,11 @@ bool AP_Arming_Rover::disarm(const AP_Arming::Method method, bool do_disarm_chec
         // reset the mission on disarm if we are not in auto
         rover.mode_auto.mission.reset();
     }
+
+#if HAL_LOGGING_ENABLED
+    // Tell logger it can stop logging
+    AP::logger().set_vehicle_armed(false);
+#endif
 
     update_soft_armed();
 
@@ -179,13 +211,13 @@ bool AP_Arming_Rover::oa_check(bool report)
 bool AP_Arming_Rover::parameter_checks(bool report)
 {
     // success if parameter checks are disabled
-    if (!check_enabled(ARMING_CHECK_PARAMETERS)) {
+    if (!check_enabled(Check::PARAMETERS)) {
         return true;
     }
 
     // check waypoint speed is positive
     if (!is_positive(rover.g2.wp_nav.get_default_speed())) {
-        check_failed(ARMING_CHECK_PARAMETERS, report, "WP_SPEED too low");
+        check_failed(Check::PARAMETERS, report, "WP_SPEED too low");
         return false;
     }
 

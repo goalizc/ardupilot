@@ -38,7 +38,11 @@ if [ ! $IS_BENTO ]; then
 fi
 
 DASHDASHLOGIN=""
-if [ ${DISTRIBUTION_CODENAME} == 'oracular' ]; then
+if false ||
+     [ ${DISTRIBUTION_CODENAME} == 'oracular' ] ||
+     [ ${DISTRIBUTION_CODENAME} == 'plucky' ] ||
+     [ ${DISTRIBUTION_CODENAME} == 'questing' ] ||
+     false; then
     # we run out of space in tmpfs /tmp while compiling wxpython, so
     # do it elsewhere:
 cat <<"EOF" | sudo -H -u vagrant bash

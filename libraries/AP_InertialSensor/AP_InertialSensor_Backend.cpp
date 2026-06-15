@@ -306,6 +306,12 @@ void AP_InertialSensor_Backend::_notify_new_gyro_raw_sample(uint8_t instance,
     } else {
         // don't accept below 40Hz
         if (_imu._gyro_raw_sample_rates[instance] < 40) {
+            // Still record the timestamp so future samples with valid timestamps can work.
+            // This breaks the bootstrap deadlock where we need samples to measure rate,
+            // but reject samples due to low rate.
+            if (sample_us != 0) {
+                _imu._gyro_last_sample_us[instance] = sample_us;
+            }
             return;
         }
 
@@ -339,9 +345,11 @@ void AP_InertialSensor_Backend::_notify_new_gyro_raw_sample(uint8_t instance,
 
     {
         WITH_SEMAPHORE(_sem);
-        uint64_t now = AP_HAL::micros64();
 
-        if (now - last_sample_us > 100000U) {
+        // Check for unhealthy gap between samples.
+        // Use sample_us (which may be synced from external source) for the comparison
+        // to stay in the same time domain as last_sample_us.
+        if (sample_us - last_sample_us > 100000U) {
             // zero accumulator if sensor was unhealthy for 0.1s
             _imu._delta_angle_acc[instance].zero();
             _imu._delta_angle_acc_dt[instance] = 0;
@@ -562,6 +570,12 @@ void AP_InertialSensor_Backend::_notify_new_accel_raw_sample(uint8_t instance,
     } else {
         // don't accept below 40Hz
         if (_imu._accel_raw_sample_rates[instance] < 40) {
+            // Still record the timestamp so future samples with valid timestamps can work.
+            // This breaks the bootstrap deadlock where we need samples to measure rate,
+            // but reject samples due to low rate.
+            if (sample_us != 0) {
+                _imu._accel_last_sample_us[instance] = sample_us;
+            }
             return;
         }
 
@@ -580,15 +594,16 @@ void AP_InertialSensor_Backend::_notify_new_accel_raw_sample(uint8_t instance,
     {
         WITH_SEMAPHORE(_sem);
 
-        uint64_t now = AP_HAL::micros64();
-
-        if (now - last_sample_us > 100000U) {
+        // Check for unhealthy gap between samples.
+        // Use sample_us (which may be synced from external source) for the comparison
+        // to stay in the same time domain as last_sample_us.
+        if (sample_us - last_sample_us > 100000U) {
             // zero accumulator if sensor was unhealthy for 0.1s
             _imu._delta_velocity_acc[instance].zero();
             _imu._delta_velocity_acc_dt[instance] = 0;
             dt = 0;
         }
-        
+
         // delta velocity
         _imu._delta_velocity_acc[instance] += accel * dt;
         _imu._delta_velocity_acc_dt[instance] += dt;
@@ -892,6 +907,13 @@ bool AP_InertialSensor_Backend::should_log_imu_raw() const
 void AP_InertialSensor_Backend::log_register_change(uint32_t bus_id, const AP_HAL::Device::checkreg &reg)
 {
 #if HAL_LOGGING_ENABLED
+// @LoggerMessage: IREG
+// @Description: IMU Register unexpected value change
+// @Field: TimeUS: Time since system startup
+// @Field: DevID: bus ID
+// @Field: Bank: device register bank
+// @Field: Reg: device register
+// @Field: Val: unexpected value
     AP::logger().Write("IREG", "TimeUS,DevID,Bank,Reg,Val", "QIBBB",
                        AP_HAL::micros64(),
                        bus_id,

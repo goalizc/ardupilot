@@ -51,8 +51,12 @@ bool AP_Arming_Plane::pre_arm_checks(bool display_failure)
         // then skip the checks
         return true;
     }
-    //are arming checks disabled?
-    if (checks_to_perform == 0) {
+    if (!hal.scheduler->is_system_initialized()) {
+        check_failed(display_failure, "System not initialised");
+        return false;
+    }
+    // are arming checks disabled?
+    if (should_skip_all_checks()) {
         return mandatory_checks(display_failure);
     }
     if (hal.util->was_watchdog_armed()) {
@@ -70,11 +74,6 @@ bool AP_Arming_Plane::pre_arm_checks(bool display_failure)
     // Check airspeed sensor
     ret &= AP_Arming::airspeed_checks(display_failure);
 #endif
-
-    if (plane.g.fs_timeout_long < plane.g.fs_timeout_short && plane.g.fs_action_short != FS_ACTION_SHORT_DISABLED) {
-        check_failed(display_failure, "FS_LONG_TIMEOUT < FS_SHORT_TIMEOUT");
-        ret = false;
-    }
 
     if (plane.aparm.roll_limit < 3) {
         check_failed(display_failure, "ROLL_LIMIT_DEG too small (%.1f)", plane.aparm.roll_limit.get());
@@ -97,7 +96,7 @@ bool AP_Arming_Plane::pre_arm_checks(bool display_failure)
     }
 
     if (plane.channel_throttle->get_reverse() && 
-        Plane::ThrFailsafe(plane.g.throttle_fs_enabled.get()) != Plane::ThrFailsafe::Disabled &&
+        plane.g.throttle_fs_enabled != Plane::ThrFailsafe::Disabled &&
         plane.g.throttle_fs_value < 
         plane.channel_throttle->get_radio_max()) {
         check_failed(display_failure, "Invalid THR_FS_VALUE for rev throttle");
@@ -177,43 +176,37 @@ bool AP_Arming_Plane::quadplane_checks(bool display_failure)
         ret = false;
     }
 
-    // lean angle parameter check
-    if (plane.quadplane.aparm.angle_max < 1000 || plane.quadplane.aparm.angle_max > 8000) {
-        check_failed(ARMING_CHECK_PARAMETERS, display_failure, "Check Q_ANGLE_MAX");
-        ret = false;
-    }
-
     if ((plane.quadplane.tailsitter.enable > 0) && (plane.quadplane.tiltrotor.enable > 0)) {
-        check_failed(ARMING_CHECK_PARAMETERS, display_failure, "set TAILSIT_ENABLE 0 or TILT_ENABLE 0");
+        check_failed(Check::PARAMETERS, display_failure, "set TAILSIT_ENABLE 0 or TILT_ENABLE 0");
         ret = false;
 
     } else {
 
         if ((plane.quadplane.tailsitter.enable > 0) && !plane.quadplane.tailsitter.enabled()) {
-            check_failed(ARMING_CHECK_PARAMETERS, display_failure, "tailsitter setup not complete, reboot");
+            check_failed(Check::PARAMETERS, display_failure, "tailsitter setup not complete, reboot");
             ret = false;
         }
 
         if ((plane.quadplane.tiltrotor.enable > 0) && !plane.quadplane.tiltrotor.enabled()) {
-            check_failed(ARMING_CHECK_PARAMETERS, display_failure, "tiltrotor setup not complete, reboot");
+            check_failed(Check::PARAMETERS, display_failure, "tiltrotor setup not complete, reboot");
             ret = false;
         }
     }
 
     // ensure controllers are OK with us arming:
-    if (!plane.quadplane.pos_control->pre_arm_checks("PSC", failure_msg, ARRAY_SIZE(failure_msg))) {
-        check_failed(ARMING_CHECK_PARAMETERS, display_failure, "Bad parameter: %s", failure_msg);
+    if (!plane.quadplane.pos_control->pre_arm_checks("Q_P", failure_msg, ARRAY_SIZE(failure_msg))) {
+        check_failed(Check::PARAMETERS, display_failure, "Bad parameter: %s", failure_msg);
         ret = false;
     }
-    if (!plane.quadplane.attitude_control->pre_arm_checks("ATC", failure_msg, ARRAY_SIZE(failure_msg))) {
-        check_failed(ARMING_CHECK_PARAMETERS, display_failure, "Bad parameter: %s", failure_msg);
+    if (!plane.quadplane.attitude_control->pre_arm_checks("Q_A", failure_msg, ARRAY_SIZE(failure_msg))) {
+        check_failed(Check::PARAMETERS, display_failure, "Bad parameter: %s", failure_msg);
         ret = false;
     }
 
     /*
       Q_ASSIST_SPEED really should be enabled for all quadplanes except tailsitters
      */
-    if (check_enabled(ARMING_CHECK_PARAMETERS) &&
+    if (check_enabled(Check::PARAMETERS) &&
         is_zero(plane.quadplane.assist.speed) &&
         !plane.quadplane.tailsitter.enabled()) {
         check_failed(display_failure,"Q_ASSIST_SPEED is not set");
@@ -221,7 +214,15 @@ bool AP_Arming_Plane::quadplane_checks(bool display_failure)
     }
 
     if ((plane.quadplane.tailsitter.enable > 0) && (plane.quadplane.q_fwd_thr_use != QuadPlane::FwdThrUse::OFF)) {
-        check_failed(ARMING_CHECK_PARAMETERS, display_failure, "set Q_FWD_THR_USE to 0");
+        check_failed(Check::PARAMETERS, display_failure, "set Q_FWD_THR_USE to 0");
+        ret = false;
+    }
+
+    // combining Q_RTL_MODE with either of the RTL_AUTOLAND options
+    // leads to precedence questions, so just don't allow it:
+    if (plane.g.rtl_autoland != RtlAutoland::RTL_DISABLE &&
+        plane.quadplane.rtl_mode != QuadPlane::RTL_MODE::NONE) {
+        check_failed(Check::PARAMETERS, display_failure, "unset one of RTL_AUTOLAND or Q_RTL_MODE");
         ret = false;
     }
 
@@ -237,10 +238,10 @@ bool AP_Arming_Plane::ins_checks(bool display_failure)
     }
 
     // additional plane specific checks
-    if (check_enabled(ARMING_CHECK_INS)) {
+    if (check_enabled(Check::INS)) {
         char failure_msg[50] = {};
         if (!AP::ahrs().pre_arm_check(true, failure_msg, sizeof(failure_msg))) {
-            check_failed(ARMING_CHECK_INS, display_failure, "AHRS: %s", failure_msg);
+            check_failed(Check::INS, display_failure, "AHRS: %s", failure_msg);
             return false;
         }
     }
@@ -250,27 +251,9 @@ bool AP_Arming_Plane::ins_checks(bool display_failure)
 
 bool AP_Arming_Plane::arm_checks(AP_Arming::Method method)
 {
-    if (method == AP_Arming::Method::RUDDER) {
-        const AP_Arming::RudderArming arming_rudder = get_rudder_arming_type();
 
-        if (arming_rudder == AP_Arming::RudderArming::IS_DISABLED) {
-            //parameter disallows rudder arming/disabling
-
-            // if we emit a message here then someone doing surface
-            // checks may be bothered by the message being emitted.
-            // check_failed(true, "Rudder arming disabled");
-            return false;
-        }
-
-        // if throttle is not down, then pilot cannot rudder arm/disarm
-        if (!is_zero(plane.get_throttle_input())){
-            check_failed(true, "Non-zero throttle");
-            return false;
-        }
-    }
-
-    //are arming checks disabled?
-    if (checks_to_perform == 0) {
+    // are arming checks disabled?
+    if (should_skip_all_checks()) {
         return true;
     }
 
@@ -325,6 +308,12 @@ bool AP_Arming_Plane::arm(const AP_Arming::Method method, const bool do_arming_c
     plane.mode_autoland.arm_check();
 #endif
 
+    if (method == AP_Arming::Method::RUDDER) {
+        // initialise the timer used to warn the user they're holding
+        // their stick over:
+        plane.takeoff_state.rudder_takeoff_warn_ms = AP_HAL::millis();
+    }
+
     send_arm_disarm_statustext("Throttle armed");
 
     return true;
@@ -340,14 +329,6 @@ bool AP_Arming_Plane::disarm(const AP_Arming::Method method, bool do_disarm_chec
          method == AP_Arming::Method::RUDDER)) {
         if (plane.is_flying()) {
             // don't allow mavlink or rudder disarm while flying
-            return false;
-        }
-    }
-    
-    if (do_disarm_checks && method == AP_Arming::Method::RUDDER) {
-        // option must be enabled:
-        if (get_rudder_arming_type() != AP_Arming::RudderArming::ARMDISARM) {
-            gcs().send_text(MAV_SEVERITY_INFO, "Rudder disarm: disabled");
             return false;
         }
     }
@@ -413,7 +394,7 @@ void AP_Arming_Plane::update_soft_armed()
 
 #if AP_PLANE_BLACKBOX_LOGGING
     if (blackbox_speed > 0) {
-        const float speed3d = plane.gps.status() >= AP_GPS::GPS_OK_FIX_3D?plane.gps.velocity().length():0;
+        const float speed3d = plane.gps.status() >= AP_GPS_FixType::FIX_3D?plane.gps.velocity().length():0;
         const uint32_t now = AP_HAL::millis();
         if (speed3d > blackbox_speed) {
             last_over_3dspeed_ms = now;
@@ -443,11 +424,11 @@ bool AP_Arming_Plane::mission_checks(bool report)
     if (plane.g.rtl_autoland == RtlAutoland::RTL_DISABLE) {
         if (plane.mission.contains_item(MAV_CMD_DO_LAND_START)) {
             ret = false;
-            check_failed(ARMING_CHECK_MISSION, report, "DO_LAND_START set and RTL_AUTOLAND disabled");
+            check_failed(Check::MISSION, report, "DO_LAND_START set and RTL_AUTOLAND disabled");
         }
         if (plane.mission.contains_item(MAV_CMD_DO_RETURN_PATH_START)) {
             ret = false;
-            check_failed(ARMING_CHECK_MISSION, report, "DO_RETURN_PATH_START set and RTL_AUTOLAND disabled");
+            check_failed(Check::MISSION, report, "DO_RETURN_PATH_START set and RTL_AUTOLAND disabled");
         }
     }
 #if HAL_QUADPLANE_ENABLED
@@ -464,10 +445,10 @@ bool AP_Arming_Plane::mission_checks(bool report)
                 const float dist = cmd.content.location.get_distance(prev_cmd.content.location);
                 const float tecs_land_speed = plane.TECS_controller.get_land_airspeed();
                 const float landing_speed = is_positive(tecs_land_speed)?tecs_land_speed:plane.aparm.airspeed_cruise;
-                const float min_dist = 0.75 * plane.quadplane.stopping_distance(sq(landing_speed));
+                const float min_dist = 0.75 * plane.quadplane.stopping_distance_m(sq(landing_speed));
                 if (dist < min_dist) {
                     ret = false;
-                    check_failed(ARMING_CHECK_MISSION, report, "VTOL land too short, min %.0fm", min_dist);
+                    check_failed(Check::MISSION, report, "VTOL land too short, min %.0fm", min_dist);
                 }
             }
             prev_cmd = cmd;
@@ -486,7 +467,7 @@ bool AP_Arming_Plane::rc_received_if_enabled_check(bool display_failure)
     }
 
     // If RC failsafe is enabled we must receive RC before arming
-    if ((Plane::ThrFailsafe(plane.g.throttle_fs_enabled.get()) == Plane::ThrFailsafe::Enabled) && 
+    if ((plane.g.throttle_fs_enabled == Plane::ThrFailsafe::Enabled) &&
         !(rc().has_had_rc_receiver() || rc().has_had_rc_override())) {
         check_failed(display_failure, "Waiting for RC");
         return false;

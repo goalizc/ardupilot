@@ -41,40 +41,16 @@ MAV_STATE GCS_MAVLINK_Blimp::vehicle_system_status() const
         return MAV_STATE_STANDBY;
     }
     if (!blimp.ap.initialised) {
-    	return MAV_STATE_BOOT;
+        return MAV_STATE_BOOT;
     }
 
     return MAV_STATE_ACTIVE;
 }
 
 
-void GCS_MAVLINK_Blimp::send_position_target_global_int()
+bool GCS_MAVLINK_Blimp::get_target_location(Location &target) const
 {
-    Location target;
-    if (!blimp.flightmode->get_wp(target)) {
-        return;
-    }
-    static constexpr uint16_t POSITION_TARGET_TYPEMASK_LAST_BYTE = 0xF000;
-    static constexpr uint16_t TYPE_MASK = POSITION_TARGET_TYPEMASK_VX_IGNORE | POSITION_TARGET_TYPEMASK_VY_IGNORE | POSITION_TARGET_TYPEMASK_VZ_IGNORE |
-                                          POSITION_TARGET_TYPEMASK_AX_IGNORE | POSITION_TARGET_TYPEMASK_AY_IGNORE | POSITION_TARGET_TYPEMASK_AZ_IGNORE |
-                                          POSITION_TARGET_TYPEMASK_YAW_IGNORE | POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE | POSITION_TARGET_TYPEMASK_LAST_BYTE;
-
-    mavlink_msg_position_target_global_int_send(
-        chan,
-        AP_HAL::millis(), // time_boot_ms
-        MAV_FRAME_GLOBAL, // targets are always global altitude
-        TYPE_MASK, // ignore everything except the x/y/z components
-        target.lat, // latitude as 1e7
-        target.lng, // longitude as 1e7
-        target.alt * 0.01f, // altitude is sent as a float
-        0.0f, // vx
-        0.0f, // vy
-        0.0f, // vz
-        0.0f, // afx
-        0.0f, // afy
-        0.0f, // afz
-        0.0f, // yaw
-        0.0f); // yaw_rate
+    return blimp.flightmode->get_wp(target);
 }
 
 void GCS_MAVLINK_Blimp::send_nav_controller_output() const
@@ -85,7 +61,7 @@ void GCS_MAVLINK_Blimp::send_nav_controller_output() const
 float GCS_MAVLINK_Blimp::vfr_hud_airspeed() const
 {
     Vector3f airspeed_vec_bf;
-    if (AP::ahrs().airspeed_vector_true(airspeed_vec_bf)) {
+    if (AP::ahrs().airspeed_vector_TAS(airspeed_vec_bf)) {
         // we are running the EKF3 wind estimation code which can give
         // us an airspeed estimate
         return airspeed_vec_bf.length();
@@ -119,7 +95,7 @@ void GCS_MAVLINK_Blimp::send_pid_tuning()
         PID_SEND::POSX,
         PID_SEND::POSY,
         PID_SEND::POSZ,
-        PID_SEND::POSYAW
+        PID_SEND::POSYAW,
     };
     for (uint8_t i=0; i<ARRAY_SIZE(axes); i++) {
         if (!(blimp.g.gcs_pid_mask & (1<<(axes[i]-1)))) {
@@ -129,37 +105,44 @@ void GCS_MAVLINK_Blimp::send_pid_tuning()
             return;
         }
         const AP_PIDInfo *pid_info = nullptr;
+        uint8_t mav_axis = 0;
         switch (axes[i]) {
         case PID_SEND::VELX:
-            pid_info = &blimp.pid_vel_xy.get_pid_info_x();
+            pid_info = &blimp.loiter->pid_vel_x.get_pid_info();
+            mav_axis = PID_TUNING_VEL_NORTH;
             break;
         case PID_SEND::VELY:
-            pid_info = &blimp.pid_vel_xy.get_pid_info_y();
+            pid_info = &blimp.loiter->pid_vel_y.get_pid_info();
+            mav_axis = PID_TUNING_VEL_EAST;
             break;
         case PID_SEND::VELZ:
-            pid_info = &blimp.pid_vel_z.get_pid_info();
+            pid_info = &blimp.loiter->pid_vel_z.get_pid_info();
+            mav_axis = PID_TUNING_VEL_DOWN;
             break;
         case PID_SEND::VELYAW:
-            pid_info = &blimp.pid_vel_yaw.get_pid_info();
+            pid_info = &blimp.loiter->pid_vel_yaw.get_pid_info();
+            mav_axis = PID_TUNING_YAW;
             break;
         case PID_SEND::POSX:
-            pid_info = &blimp.pid_pos_xy.get_pid_info_x();
+            pid_info = &blimp.loiter->pid_pos_x.get_pid_info();
+            mav_axis = PID_TUNING_POS_NORTH;
             break;
         case PID_SEND::POSY:
-            pid_info = &blimp.pid_pos_xy.get_pid_info_y();
+            pid_info = &blimp.loiter->pid_pos_y.get_pid_info();
+            mav_axis = PID_TUNING_POS_EAST;
             break;
         case PID_SEND::POSZ:
-            pid_info = &blimp.pid_pos_z.get_pid_info();
+            pid_info = &blimp.loiter->pid_pos_z.get_pid_info();
+            mav_axis = PID_TUNING_POS_DOWN;
             break;
         case PID_SEND::POSYAW:
-            pid_info = &blimp.pid_pos_yaw.get_pid_info();
+            pid_info = &blimp.loiter->pid_pos_yaw.get_pid_info();
+            mav_axis = PID_TUNING_YAW_ANGLE;
             break;
-        default:
-            continue;
         }
         if (pid_info != nullptr) {
             mavlink_msg_pid_tuning_send(chan,
-                                        axes[i],
+                                        mav_axis,
                                         pid_info->target,
                                         pid_info->actual,
                                         pid_info->FF,
@@ -170,20 +153,6 @@ void GCS_MAVLINK_Blimp::send_pid_tuning()
                                         pid_info->Dmod);
         }
     }
-}
-
-uint8_t GCS_MAVLINK_Blimp::sysid_my_gcs() const
-{
-    return blimp.g.sysid_my_gcs;
-}
-bool GCS_MAVLINK_Blimp::sysid_enforce() const
-{
-    return blimp.g2.sysid_enforce;
-}
-
-uint32_t GCS_MAVLINK_Blimp::telem_delay() const
-{
-    return (uint32_t)(blimp.g.telem_delay);
 }
 
 bool GCS_Blimp::vehicle_initialised() const
@@ -201,9 +170,6 @@ bool GCS_MAVLINK_Blimp::try_send_message(enum ap_message id)
         send_wind();
         break;
 
-    case MSG_SERVO_OUT:
-    case MSG_AOA_SSA:
-    case MSG_LANDING:
     case MSG_ADSB_VEHICLE:
         // unused
         break;
@@ -213,216 +179,6 @@ bool GCS_MAVLINK_Blimp::try_send_message(enum ap_message id)
     }
     return true;
 }
-
-
-const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
-    // @Param: RAW_SENS
-    // @DisplayName: Raw sensor stream rate
-    // @Description: Stream rate of RAW_IMU, SCALED_IMU2, SCALED_IMU3, SCALED_PRESSURE, SCALED_PRESSURE2, SCALED_PRESSURE3, AIRSPEED and SENSOR_OFFSETS to ground station
-    // @Units: Hz
-    // @Range: 0 10
-    // @Increment: 1
-    // @RebootRequired: True
-    // @User: Advanced
-    AP_GROUPINFO("RAW_SENS", 0, GCS_MAVLINK_Parameters, streamRates[0],  0),
-
-    // @Param: EXT_STAT
-    // @DisplayName: Extended status stream rate to ground station
-    // @Description: Stream rate of SYS_STATUS, POWER_STATUS, MCU_STATUS, MEMINFO, CURRENT_WAYPOINT, GPS_RAW_INT, GPS_RTK (if available), GPS2_RAW (if available), GPS2_RTK (if available), NAV_CONTROLLER_OUTPUT, and FENCE_STATUS to ground station
-    // @Units: Hz
-    // @Range: 0 10
-    // @Increment: 1
-    // @RebootRequired: True
-    // @User: Advanced
-    AP_GROUPINFO("EXT_STAT", 1, GCS_MAVLINK_Parameters, streamRates[1],  0),
-
-    // @Param: RC_CHAN
-    // @DisplayName: RC Channel stream rate to ground station
-    // @Description: Stream rate of SERVO_OUTPUT_RAW and RC_CHANNELS to ground station
-    // @Units: Hz
-    // @Range: 0 10
-    // @Increment: 1
-    // @RebootRequired: True
-    // @User: Advanced
-    AP_GROUPINFO("RC_CHAN",  2, GCS_MAVLINK_Parameters, streamRates[2],  0),
-
-    // @Param: RAW_CTRL
-    // @DisplayName: Unused
-    // @Description: Unused
-    // @Units: Hz
-    // @Range: 0 10
-    // @Increment: 1
-    // @RebootRequired: True
-    // @User: Advanced
-    AP_GROUPINFO("RAW_CTRL", 3, GCS_MAVLINK_Parameters, streamRates[3],  0),
-
-    // @Param: POSITION
-    // @DisplayName: Position stream rate to ground station
-    // @Description: Stream rate of GLOBAL_POSITION_INT and LOCAL_POSITION_NED to ground station
-    // @Units: Hz
-    // @Range: 0 10
-    // @Increment: 1
-    // @RebootRequired: True
-    // @User: Advanced
-    AP_GROUPINFO("POSITION", 4, GCS_MAVLINK_Parameters, streamRates[4],  0),
-
-    // @Param: EXTRA1
-    // @DisplayName: Extra data type 1 stream rate to ground station
-    // @Description: Stream rate of ATTITUDE, SIMSTATE (SITL only), AHRS2 and PID_TUNING to ground station
-    // @Units: Hz
-    // @Range: 0 10
-    // @Increment: 1
-    // @RebootRequired: True
-    // @User: Advanced
-    AP_GROUPINFO("EXTRA1",   5, GCS_MAVLINK_Parameters, streamRates[5],  0),
-
-    // @Param: EXTRA2
-    // @DisplayName: Extra data type 2 stream rate to ground station
-    // @Description: Stream rate of VFR_HUD to ground station
-    // @Units: Hz
-    // @Range: 0 10
-    // @Increment: 1
-    // @RebootRequired: True
-    // @User: Advanced
-    AP_GROUPINFO("EXTRA2",   6, GCS_MAVLINK_Parameters, streamRates[6],  0),
-
-    // @Param: EXTRA3
-    // @DisplayName: Extra data type 3 stream rate to ground station
-    // @Description: Stream rate of AHRS, SYSTEM_TIME, RANGEFINDER, DISTANCE_SENSOR, GIMBAL_DEVICE_ATTITUDE_STATUS, OPTICAL_FLOW, MAG_CAL_REPORT, MAG_CAL_PROGRESS, EKF_STATUS_REPORT, VIBRATION and RPM to ground station
-    // @Units: Hz
-    // @Range: 0 10
-    // @Increment: 1
-    // @RebootRequired: True
-    // @User: Advanced
-    AP_GROUPINFO("EXTRA3",   7, GCS_MAVLINK_Parameters, streamRates[7],  0),
-
-    // @Param: PARAMS
-    // @DisplayName: Parameter stream rate to ground station
-    // @Description: Stream rate of PARAM_VALUE to ground station
-    // @Units: Hz
-    // @Range: 0 10
-    // @Increment: 1
-    // @RebootRequired: True
-    // @User: Advanced
-    AP_GROUPINFO("PARAMS",   8, GCS_MAVLINK_Parameters, streamRates[8],  0),
-    AP_GROUPEND
-};
-
-static const ap_message STREAM_RAW_SENSORS_msgs[] = {
-    MSG_RAW_IMU,
-    MSG_SCALED_IMU2,
-    MSG_SCALED_IMU3,
-    MSG_SCALED_PRESSURE,
-    MSG_SCALED_PRESSURE2,
-    MSG_SCALED_PRESSURE3,
-#if AP_AIRSPEED_ENABLED
-    MSG_AIRSPEED,
-#endif
-};
-static const ap_message STREAM_EXTENDED_STATUS_msgs[] = {
-    MSG_SYS_STATUS,
-    MSG_POWER_STATUS,
-#if HAL_WITH_MCU_MONITORING
-    MSG_MCU_STATUS,
-#endif
-    MSG_MEMINFO,
-    MSG_CURRENT_WAYPOINT, // MISSION_CURRENT
-#if AP_GPS_GPS_RAW_INT_SENDING_ENABLED
-    MSG_GPS_RAW,
-#endif
-#if AP_GPS_GPS_RTK_SENDING_ENABLED
-    MSG_GPS_RTK,
-#endif
-#if AP_GPS_GPS2_RAW_SENDING_ENABLED
-    MSG_GPS2_RAW,
-#endif
-#if AP_GPS_GPS2_RTK_SENDING_ENABLED
-    MSG_GPS2_RTK,
-#endif
-    MSG_NAV_CONTROLLER_OUTPUT,
-#if AP_FENCE_ENABLED
-    MSG_FENCE_STATUS,
-#endif
-    MSG_POSITION_TARGET_GLOBAL_INT,
-};
-static const ap_message STREAM_POSITION_msgs[] = {
-    MSG_LOCATION,
-    MSG_LOCAL_POSITION
-};
-static const ap_message STREAM_RC_CHANNELS_msgs[] = {
-    MSG_SERVO_OUTPUT_RAW,
-    MSG_RC_CHANNELS,
-#if AP_MAVLINK_MSG_RC_CHANNELS_RAW_ENABLED
-    MSG_RC_CHANNELS_RAW, // only sent on a mavlink1 connection
-#endif
-};
-static const ap_message STREAM_EXTRA1_msgs[] = {
-    MSG_ATTITUDE,
-#if AP_SIM_ENABLED
-    MSG_SIMSTATE,
-#endif
-    MSG_AHRS2,
-    MSG_PID_TUNING // Up to four PID_TUNING messages are sent, depending on GCS_PID_MASK parameter
-};
-static const ap_message STREAM_EXTRA2_msgs[] = {
-    MSG_VFR_HUD
-};
-static const ap_message STREAM_EXTRA3_msgs[] = {
-    MSG_AHRS,
-    MSG_SYSTEM_TIME,
-    MSG_WIND,
-#if AP_RANGEFINDER_ENABLED
-    MSG_RANGEFINDER,
-#endif
-    MSG_DISTANCE_SENSOR,
-#if AP_BATTERY_ENABLED
-    MSG_BATTERY_STATUS,
-#endif
-#if HAL_MOUNT_ENABLED
-    MSG_GIMBAL_DEVICE_ATTITUDE_STATUS,
-#endif
-#if AP_OPTICALFLOW_ENABLED
-    MSG_OPTICAL_FLOW,
-#endif
-#if COMPASS_CAL_ENABLED
-    MSG_MAG_CAL_REPORT,
-    MSG_MAG_CAL_PROGRESS,
-#endif
-    MSG_EKF_STATUS_REPORT,
-    MSG_VIBRATION,
-#if AP_RPM_ENABLED
-    MSG_RPM,
-#endif
-#if HAL_WITH_ESC_TELEM
-    MSG_ESC_TELEMETRY,
-#endif
-#if HAL_GENERATOR_ENABLED
-    MSG_GENERATOR_STATUS,
-#endif
-};
-static const ap_message STREAM_PARAMS_msgs[] = {
-    MSG_NEXT_PARAM,
-    MSG_AVAILABLE_MODES
-};
-static const ap_message STREAM_ADSB_msgs[] = {
-    MSG_ADSB_VEHICLE,
-#if AP_AIS_ENABLED
-    MSG_AIS_VESSEL,
-#endif
-};
-
-const struct GCS_MAVLINK::stream_entries GCS_MAVLINK::all_stream_entries[] = {
-    MAV_STREAM_ENTRY(STREAM_RAW_SENSORS),
-    MAV_STREAM_ENTRY(STREAM_EXTENDED_STATUS),
-    MAV_STREAM_ENTRY(STREAM_POSITION),
-    MAV_STREAM_ENTRY(STREAM_RC_CHANNELS),
-    MAV_STREAM_ENTRY(STREAM_EXTRA1),
-    MAV_STREAM_ENTRY(STREAM_EXTRA2),
-    MAV_STREAM_ENTRY(STREAM_EXTRA3),
-    MAV_STREAM_ENTRY(STREAM_ADSB),
-    MAV_STREAM_ENTRY(STREAM_PARAMS),
-    MAV_STREAM_TERMINATOR // must have this at end of stream_entries
-};
 
 void GCS_MAVLINK_Blimp::packetReceived(const mavlink_status_t &status,
                                        const mavlink_message_t &msg)
@@ -470,11 +226,6 @@ MAV_RESULT GCS_MAVLINK_Blimp::handle_command_int_do_reposition(const mavlink_com
         return MAV_RESULT_DENIED;
     }
 
-    // sanity check location
-    if (!check_latlng(packet.x, packet.y)) {
-        return MAV_RESULT_DENIED;
-    }
-
     Location request_location {};
     if (!location_from_command_t(packet, request_location)) {
         return MAV_RESULT_DENIED;
@@ -514,11 +265,6 @@ bool GCS_MAVLINK_Blimp::mav_frame_for_command_long(MAV_FRAME &frame, MAV_CMD pac
 void GCS_MAVLINK_Blimp::handle_message(const mavlink_message_t &msg)
 {
     switch (msg.msgid) {
-
-    case MAVLINK_MSG_ID_TERRAIN_DATA:
-    case MAVLINK_MSG_ID_TERRAIN_CHECK:
-        break;
-
     default:
         GCS_MAVLINK::handle_message(msg);
         break;
@@ -575,7 +321,7 @@ MAV_LANDED_STATE GCS_MAVLINK_Blimp::landed_state() const
 void GCS_MAVLINK_Blimp::send_wind() const
 {
     Vector3f airspeed_vec_bf;
-    if (!AP::ahrs().airspeed_vector_true(airspeed_vec_bf)) {
+    if (!AP::ahrs().airspeed_vector_TAS(airspeed_vec_bf)) {
         // if we don't have an airspeed estimate then we don't have a
         // valid wind estimate on blimps
         return;
@@ -584,7 +330,7 @@ void GCS_MAVLINK_Blimp::send_wind() const
     mavlink_msg_wind_send(
         chan,
         degrees(atan2f(-wind.y, -wind.x)),
-        wind.length(),
+        wind.xy().length(),
         wind.z);
 }
 
@@ -592,20 +338,20 @@ void GCS_MAVLINK_Blimp::send_wind() const
 uint8_t GCS_MAVLINK_Blimp::high_latency_wind_speed() const
 {
     Vector3f airspeed_vec_bf;
-    if (!AP::ahrs().airspeed_vector_true(airspeed_vec_bf)) {
+    if (!AP::ahrs().airspeed_vector_TAS(airspeed_vec_bf)) {
         // if we don't have an airspeed estimate then we don't have a
         // valid wind estimate on blimps
         return 0;
     }
     // return units are m/s*5
     const Vector3f wind = AP::ahrs().wind_estimate();
-    return wind.length() * 5;
+    return wind.xy().length() * 5;
 }
 
 uint8_t GCS_MAVLINK_Blimp::high_latency_wind_direction() const
 {
     Vector3f airspeed_vec_bf;
-    if (!AP::ahrs().airspeed_vector_true(airspeed_vec_bf)) {
+    if (!AP::ahrs().airspeed_vector_TAS(airspeed_vec_bf)) {
         // if we don't have an airspeed estimate then we don't have a
         // valid wind estimate on blimps
         return 0;

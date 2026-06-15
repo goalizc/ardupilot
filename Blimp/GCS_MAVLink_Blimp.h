@@ -13,19 +13,14 @@ public:
 
 protected:
 
-    uint32_t telem_delay() const override;
-
     MAV_RESULT handle_flight_termination(const mavlink_command_int_t &packet) override;
-
-    uint8_t sysid_my_gcs() const override;
-    bool sysid_enforce() const override;
 
     bool params_ready() const override;
     void send_banner() override;
 
     MAV_RESULT _handle_command_preflight_calibration(const mavlink_command_int_t &packet, const mavlink_message_t &msg) override;
 
-    void send_position_target_global_int() override;
+    bool get_target_location(Location &loc) const override;
 
     MAV_RESULT handle_command_do_set_roi(const Location &roi_loc) override;
     MAV_RESULT handle_command_int_packet(const mavlink_command_int_t &packet, const mavlink_message_t &msg) override;
@@ -71,7 +66,8 @@ private:
 
     void send_wind() const;
 
-    //This is 1-indexed, unlike most enums for consistency with the mavlink PID_TUNING enums.
+    // Internal bitmask indices for gcs_pid_mask (1-indexed, sequential).
+    // These do not correspond to MAVLink PID_TUNING_AXIS values.
     enum PID_SEND : uint8_t {
         VELX =        1,
         VELY =        2,

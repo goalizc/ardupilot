@@ -8,7 +8,7 @@
 
 #include "SIM_GPS.h"
 
-#if HAL_SIM_GPS_ENABLED
+#if AP_SIM_GPS_ENABLED
 
 #include <time.h>
 #include <sys/time.h>
@@ -141,6 +141,26 @@ const AP_Param::GroupInfo SIM::GPSParms::var_info[] = {
     // @Values: 0:Disabled, 1:Enabled
     AP_GROUPINFO("JAM",       16, GPSParms, jam, 0),
 
+    // @Param: HDG_OFS
+    // @DisplayName: GPS heading offset
+    // @Description: GPS heading offset in degrees. how off the simulated GPS heading is from the actual heading
+    // @User: Advanced
+    AP_GROUPINFO("HDG_OFS",  17, GPSParms,  heading_offset, 0),
+
+    // @Param: OPTIONS
+    // @DisplayName: GPS Options
+    // @Description: GPS Options bitmask
+    // @Bitmask: 0:UBlox GPS is F9P
+    // @User: Advanced
+    AP_GROUPINFO("OPTIONS",  18, GPSParms, options, 0),
+
+    // @Param: FIXTYPE
+    // @DisplayName: GPS Fix Type
+    // @Description: Allow setting which fix type (only some GPS's supported); matches AP_GPS_FixType
+    // @Values: 0:No GPS connected, 1:No Fix, 2:2D Fix, 3:3D Fix, 4:3D DGPS Fix, 5:3D RTK Float, 6:3D RTK Fixed
+    // @User: Advanced
+    AP_GROUPINFO("FIXTYPE", 19, GPSParms, fix_type, 6),
+
     AP_GROUPEND
 };
 }
@@ -159,7 +179,7 @@ GPS_Backend::GPS_Backend(GPS &_front, uint8_t _instance) :
 {
     _sitl = AP::sitl();
 
-#if HAL_SIM_GPS_ENABLED && AP_SIM_MAX_GPS_SENSORS > 0
+#if AP_SIM_GPS_ENABLED && AP_SIM_MAX_GPS_SENSORS > 0
     // default the first backend to enabled:
     if (_instance == 0 && !_sitl->gps[0].enabled.configured()) {
         _sitl->gps[0].enabled.set(1);
@@ -462,11 +482,6 @@ void GPS::update()
 
     const auto &params = _sitl->gps[instance];
 
-    struct GPS_Data d {};
-
-    // simulate delayed lock times
-    bool have_lock = (params.enabled && now_ms >= params.lock_time*1000UL);
-
     // Only let physics run and GPS write at configured GPS rate (default 5Hz).
     if ((now_ms - last_write_update_ms) < (uint32_t)(1000/params.hertz)) {
         // Reading runs every iteration.
@@ -478,10 +493,13 @@ void GPS::update()
 
     last_write_update_ms = now_ms;
 
+    struct GPS_Data d {};
+
     d.num_sats = params.numsats;
+    d.fix_type = params.fix_type;
     d.latitude = latitude;
     d.longitude = longitude;
-    d.yaw_deg = _sitl->state.yawDeg;
+    d.yaw_deg = wrap_360(_sitl->state.yawDeg + params.heading_offset);
     d.roll_deg = _sitl->state.rollDeg;
     d.pitch_deg = _sitl->state.pitchDeg;
 
@@ -494,7 +512,8 @@ void GPS::update()
     d.speedE = speedE + (velErrorNED.y * rand_float());
     d.speedD = speedD + (velErrorNED.z * rand_float());
 
-    d.have_lock = have_lock;
+    // simulate delayed lock times
+    d.have_lock = (params.enabled && now_ms >= params.lock_time*1000UL);
 
     // fill in accuracies
     d.horizontal_acc = params.accuracy;
@@ -610,4 +629,4 @@ float GPS_Data::speed_2d() const
     return velocity.length();
 }
 
-#endif  // HAL_SIM_GPS_ENABLED
+#endif  // AP_SIM_GPS_ENABLED

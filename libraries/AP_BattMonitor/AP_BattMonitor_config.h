@@ -10,6 +10,11 @@
 #define AP_BATTERY_ENABLED 1
 #endif
 
+// maximum number of battery monitors
+#ifndef AP_BATT_MONITOR_MAX_INSTANCES
+#define AP_BATT_MONITOR_MAX_INSTANCES       9
+#endif
+
 #ifndef AP_BATTERY_BACKEND_DEFAULT_ENABLED
 #define AP_BATTERY_BACKEND_DEFAULT_ENABLED AP_BATTERY_ENABLED
 #endif
@@ -73,6 +78,10 @@
 #ifndef AP_BATTERY_INA3221_ENABLED
 // turned on in hwdefs (except for sim test), requires config
 #define AP_BATTERY_INA3221_ENABLED (AP_BATTERY_BACKEND_DEFAULT_ENABLED && CONFIG_HAL_BOARD == HAL_BOARD_SITL)
+#endif
+
+#ifndef AP_BATTERY_TIBQ76952_ENABLED
+#define AP_BATTERY_TIBQ76952_ENABLED 0  // device must be specified in hwdef
 #endif
 
 #ifndef AP_BATTERY_LTC2946_ENABLED

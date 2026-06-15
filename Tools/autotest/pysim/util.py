@@ -2,6 +2,8 @@
 AP_FLAKE8_CLEAN
 '''
 
+from __future__ import annotations
+
 import atexit
 import math
 import os
@@ -13,13 +15,7 @@ import sys
 import tempfile
 import time
 
-
 import pexpect
-
-if sys.version_info[0] >= 3:
-    ENCODING = 'ascii'
-else:
-    ENCODING = None
 
 RADIUS_OF_EARTH = 6378100.0  # in meters
 
@@ -49,7 +45,7 @@ def reltopdir(path):
     return os.path.normpath(os.path.join(topdir(), path))
 
 
-def run_cmd(cmd, directory=".", show=True, output=False, checkfail=True):
+def run_cmd(cmd, directory=".", show=True, output=False, checkfail=True, env=None):
     """Run a shell command."""
     shell = False
     if not isinstance(cmd, list):
@@ -58,11 +54,11 @@ def run_cmd(cmd, directory=".", show=True, output=False, checkfail=True):
     if show:
         print("Running: (%s) in (%s)" % (cmd_as_shell(cmd), directory,))
     if output:
-        return subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE, cwd=directory).communicate()[0]
+        return subprocess.Popen(cmd, shell=shell, stdout=subprocess.PIPE, cwd=directory, env=env).communicate()[0]
     elif checkfail:
-        return subprocess.check_call(cmd, shell=shell, cwd=directory)
+        return subprocess.check_call(cmd, shell=shell, cwd=directory, env=env)
     else:
-        return subprocess.call(cmd, shell=shell, cwd=directory)
+        return subprocess.call(cmd, shell=shell, cwd=directory, env=env)
 
 
 def rmfile(path):
@@ -90,13 +86,20 @@ def waf_configure(board,
                   ekf_single=False,
                   postype_single=False,
                   force_32bit=False,
-                  extra_args=[],
+                  extra_args: list | None = None,
                   extra_hwdef=None,
                   ubsan=False,
                   ubsan_abort=False,
                   num_aux_imus=0,
                   dronecan_tests=False,
-                  extra_defines={}):
+                  extra_defines: dict | None = None,
+                  asan=False):
+
+    if extra_args is None:
+        extra_args = []
+    if extra_defines is None:
+        extra_defines = {}
+
     cmd_configure = [relwaf(), "configure", "--board", board]
     if debug:
         cmd_configure.append('--debug')
@@ -127,7 +130,41 @@ def waf_configure(board,
     pieces = [shlex.split(x) for x in extra_args]
     for piece in pieces:
         cmd_configure.extend(piece)
-    run_cmd(cmd_configure, directory=topdir(), checkfail=True)
+
+    configure_env = None
+    if asan:
+        cmd_configure.append('--asan')
+        if not debug:
+            cmd_configure.append('--debug')  # waf enforces this; be explicit
+        # Resolve the clang compiler. Honour CXX/CC if already set by the
+        # caller; otherwise search for a versioned clang++ by counting down
+        # from a high version number so we pick the newest one available.
+        # The unversioned 'clang++' is tried last as a fallback.
+        import shutil
+        cxx = os.environ.get('CXX')
+        if not cxx:
+            for ver in range(99, 13, -1):
+                candidate = 'clang++-%u' % ver
+                if shutil.which(candidate):
+                    cxx = candidate
+                    break
+            if not cxx and shutil.which('clang++'):
+                cxx = 'clang++'
+        cc = os.environ.get('CC')
+        if not cc:
+            # Derive cc from the cxx version we found so both compilers are
+            # from the same toolchain (e.g. clang++-19 → clang-19).
+            if cxx and cxx != 'clang++':
+                cc = cxx.replace('clang++', 'clang')
+            elif shutil.which('clang'):
+                cc = 'clang'
+        if not cxx or not cc:
+            raise RuntimeError("--asan requires clang; install clang or set CXX/CC environment variables")
+        configure_env = dict(os.environ)
+        configure_env['CXX'] = cxx
+        configure_env['CC'] = cc
+
+    run_cmd(cmd_configure, directory=topdir(), checkfail=True, env=configure_env)
 
 
 def waf_clean():
@@ -149,8 +186,8 @@ def build_SITL(
         coverage=False,
         debug=False,
         ekf_single=False,
-        extra_configure_args=[],
-        extra_defines={},
+        extra_configure_args: list | None = None,
+        extra_defines: dict | None = None,
         j=None,
         math_check_indexes=False,
         postype_single=False,
@@ -159,7 +196,12 @@ def build_SITL(
         ubsan_abort=False,
         num_aux_imus=0,
         dronecan_tests=False,
+        asan=False,
 ):
+    if extra_configure_args is None:
+        extra_configure_args = []
+    if extra_defines is None:
+        extra_defines = {}
 
     # first configure
     if configure:
@@ -176,7 +218,8 @@ def build_SITL(
                       extra_defines=extra_defines,
                       num_aux_imus=num_aux_imus,
                       dronecan_tests=dronecan_tests,
-                      extra_args=extra_configure_args,)
+                      extra_args=extra_configure_args,
+                      asan=asan,)
 
     # then clean
     if clean:
@@ -190,10 +233,57 @@ def build_SITL(
     return True
 
 
+def build_SITL_frame(
+        vehicleinfo_key,
+        frame,
+        extra_configure_args: list | None = None,
+        **build_kwargs,
+):
+    '''Build the main vehicle SITL plus (when defined) the AP_Periph
+    companion for a frame entry in pysim/vehicleinfo.json.
+
+    Reads the frame's `waf_target`, `configure_args` and (optional)
+    `periph_board` fields, then runs `build_SITL()` once for the vehicle
+    and (if the frame defines a periph_board) once more for the
+    companion AP_Periph build. `configure_args` are passed through to
+    waf configure for both builds and prepended to any caller-supplied
+    `extra_configure_args`.
+
+    `build_kwargs` are forwarded verbatim to `build_SITL()` (e.g. debug,
+    clean, j, ...).
+
+    Returns the frame's options dict so callers can read
+    `periph_extra_args` / `periph_params_filename` for follow-up work.
+    '''
+    from pysim import vehicleinfo
+    vinfo = vehicleinfo.VehicleInfo()
+    frame_opts = vinfo.options[vehicleinfo_key]['frames'][frame]
+
+    configure_args = list(frame_opts.get('configure_args', []))
+    if extra_configure_args is not None:
+        configure_args += list(extra_configure_args)
+
+    build_SITL(frame_opts['waf_target'],
+               extra_configure_args=configure_args,
+               **build_kwargs)
+
+    periph_board = frame_opts.get('periph_board')
+    if periph_board is not None:
+        build_SITL('bin/AP_Periph',
+                   board=periph_board,
+                   extra_configure_args=configure_args,
+                   **build_kwargs)
+
+    return frame_opts
+
+
 def build_examples(board, j=None, debug=False, clean=False, configure=True, math_check_indexes=False, coverage=False,
                    ekf_single=False, postype_single=False, force_32bit=False, ubsan=False, ubsan_abort=False,
                    num_aux_imus=0, dronecan_tests=False,
-                   extra_configure_args=[]):
+                   extra_configure_args: list | None = None):
+    if extra_configure_args is None:
+        extra_configure_args = []
+
     # first configure
     if configure:
         waf_configure(board,
@@ -247,7 +337,10 @@ def build_tests(board,
                 ubsan_abort=False,
                 num_aux_imus=0,
                 dronecan_tests=False,
-                extra_configure_args=[]):
+                extra_configure_args: list | None = None,
+                asan=False):
+    if extra_configure_args is None:
+        extra_configure_args = []
 
     # first configure
     if configure:
@@ -263,7 +356,8 @@ def build_tests(board,
                       ubsan_abort=ubsan_abort,
                       num_aux_imus=num_aux_imus,
                       dronecan_tests=dronecan_tests,
-                      extra_args=extra_configure_args,)
+                      extra_args=extra_configure_args,
+                      asan=asan,)
 
     # then clean
     if clean:
@@ -280,13 +374,11 @@ close_list = []
 
 def pexpect_autoclose(p):
     """Mark for autoclosing."""
-    global close_list
     close_list.append(p)
 
 
 def pexpect_close(p):
     """Close a pexpect child."""
-    global close_list
 
     ex = None
     if p is None:
@@ -306,11 +398,11 @@ def pexpect_close(p):
             time.sleep(0.05)
     try:
         p.close()
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     try:
         p.close(force=True)
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     if p in close_list:
         close_list.remove(p)
@@ -318,7 +410,6 @@ def pexpect_close(p):
 
 def pexpect_close_all():
     """Close all pexpect children."""
-    global close_list
     for p in close_list[:]:
         pexpect_close(p)
 
@@ -327,7 +418,7 @@ def pexpect_drain(p):
     """Drain any pending input."""
     try:
         p.read_nonblocking(1000, timeout=0)
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -344,7 +435,16 @@ def make_safe_filename(text):
 
 
 def valgrind_log_filepath(binary, model):
+    if model is None:
+        model = 'None'
     return make_safe_filename('%s-%s-valgrind.log' % (os.path.basename(binary), model,))
+
+
+def asan_log_filepath(binary, model):
+    if model is None:
+        model = 'None'
+    # ASAN appends .<pid> to this path; glob with asan_log_filepath(...)+".*"
+    return make_safe_filename('%s-%s-asan' % (os.path.basename(binary), model))
 
 
 def kill_screen_gdb():
@@ -353,7 +453,6 @@ def kill_screen_gdb():
 
 
 def kill_mac_terminal():
-    global windowID
     for window in windowID:
         cmd = ("osascript -e \'tell application \"Terminal\" to close "
                "(window(get index of window id %s))\'" % window)
@@ -411,6 +510,7 @@ class PSpawnStdPrettyPrinter(object):
 def start_SITL(binary,
                valgrind=False,
                callgrind=False,
+               cwd=None,
                gdb=False,
                gdb_no_tui=False,
                wipe=False,
@@ -418,22 +518,35 @@ def start_SITL(binary,
                model=None,
                speedup=1,
                sim_rate_hz=None,
-               defaults_filepath=[],
+               defaults_filepath: list | None = None,
+               param_defaults=None,  # dictionary
                unhide_parameters=False,
                gdbserver=False,
-               breakpoints=[],
+               breakpoints: list | None = None,
                disable_breakpoints=False,
-               customisations=[],
+               customisations: list | None = None,
                lldb=False,
+               strace=False,
                enable_fgview=False,
                supplementary=False,
-               stdout_prefix=None):
-
-    if model is None and not supplementary:
-        raise ValueError("model must not be None")
-
+               stdout_prefix=None,
+               asan=False,
+               ):
     """Launch a SITL instance."""
+
+    if defaults_filepath is None:
+        defaults_filepath = []
+    if breakpoints is None:
+        breakpoints = []
+    if customisations is None:
+        customisations = []
+
     cmd = []
+    # pexpect doesn't like pathlib:
+    if cwd is not None:
+        cwd = str(cwd)
+    if not isinstance(binary, str):
+        binary = str(binary)
     if (callgrind or valgrind) and os.path.exists('/usr/bin/valgrind'):
         # we specify a prefix for vgdb-pipe because on Vagrant virtual
         # machines the pipes are created on the mountpoint for the
@@ -486,6 +599,10 @@ def start_SITL(binary,
                         '-m',
                         '-S', 'ardupilot-gdb',
                         'gdb', '--cd', os.getcwd(), '-x', '/tmp/x.gdb', binary, '--args'])
+    elif strace:
+        cmd.append("strace")
+        strace_options = ['-f', '-o', binary + '.strace', '-s', '8000', '-ttt']
+        cmd.extend(strace_options)
     elif lldb:
         f = open("/tmp/x.lldb", "w")
         for breakingpoint in breakpoints:
@@ -510,12 +627,20 @@ def start_SITL(binary,
         defaults_filepath = [defaults_filepath]
     defaults = [reltopdir(path) for path in defaults_filepath]
 
+    if param_defaults is not None:
+        text = "".join([f"{name} {value}\n" for (name, value) in param_defaults.items()])
+        filepath = tempfile.NamedTemporaryFile(mode="w", delete=False)
+        print(text, file=filepath)
+        filepath.close()
+        defaults.append(str(filepath.name))
+
     if not supplementary:
         if wipe:
             cmd.append('-w')
         if home is not None:
             cmd.extend(['--home', home])
-        cmd.extend(['--model', model])
+        if model is not None:
+            cmd.extend(['--model', model])
         if speedup is not None and speedup != 1:
             ntf = tempfile.NamedTemporaryFile(mode="w", delete=False)
             print(f"SIM_SPEEDUP {speedup}", file=ntf)
@@ -546,7 +671,6 @@ def start_SITL(binary,
     pexpect_logfile = PSpawnStdPrettyPrinter(prefix=pexpect_logfile_prefix)
 
     if (gdb or lldb) and sys.platform == "darwin" and os.getenv('DISPLAY'):
-        global windowID
         # on MacOS record the window IDs so we can close them later
         atexit.register(kill_mac_terminal)
         child = None
@@ -555,7 +679,7 @@ def start_SITL(binary,
         runme = [os.path.join(autotest_dir, "run_in_terminal_window.sh"), 'mactest']
         runme.extend(cmd)
         print(cmd)
-        out = subprocess.Popen(runme, stdout=subprocess.PIPE).communicate()[0]
+        out = subprocess.Popen(runme, stdout=subprocess.PIPE, cwd=cwd).communicate()[0]
         out = out.decode('utf-8')
         p = re.compile('tab 1 of window id (.*)')
 
@@ -575,7 +699,7 @@ def start_SITL(binary,
             print("Cannot find %s process terminal" % binary)
         child = FakeMacOSXSpawn()
     elif gdb and not os.getenv('DISPLAY'):
-        subprocess.Popen(cmd)
+        subprocess.Popen(cmd, cwd=cwd)
         atexit.register(kill_screen_gdb)
         # we are expected to return a pexpect wrapped around the
         # stdout of the ArduPilot binary.  Not going to happen until
@@ -583,14 +707,25 @@ def start_SITL(binary,
         # meantime, return a dummy:
         return pexpect.spawn("true", ["true"],
                              logfile=pexpect_logfile,
-                             encoding=ENCODING,
+                             encoding='ascii',
                              timeout=5)
     else:
         print("Running: %s" % cmd_as_shell(cmd))
 
         first = cmd[0]
         rest = cmd[1:]
-        child = pexpect.spawn(first, rest, logfile=pexpect_logfile, encoding=ENCODING, timeout=5)
+        spawn_env = None
+        if asan:
+            spawn_env = dict(os.environ)
+            log_base = asan_log_filepath(binary=binary, model=model)
+            existing = spawn_env.get('ASAN_OPTIONS', '')
+            # Append our options after any inherited ones so that our
+            # log_path and verbosity=0 take precedence (last value wins).
+            # verbosity=0 suppresses startup noise that would make the log
+            # non-empty even when no errors are detected.
+            our_opts = 'log_path=%s:symbolize=1:verbosity=0' % log_base
+            spawn_env['ASAN_OPTIONS'] = (existing + ':' + our_opts) if existing else our_opts
+        child = pexpect.spawn(str(first), rest, logfile=pexpect_logfile, encoding='ascii', timeout=5, cwd=cwd, env=spawn_env)
         pexpect_autoclose(child)
     if gdb or lldb:
         # if we run GDB we do so in an xterm.  "Waiting for
@@ -624,11 +759,14 @@ def start_MAVProxy_SITL(atype,
                         aircraft=None,
                         setup=False,
                         master=None,
-                        options=[],
+                        options: list | None = None,
                         sitl_rcin_port=5501,
                         pexpect_timeout=60,
                         logfile=sys.stdout):
     """Launch mavproxy connected to a SITL instance."""
+    if options is None:
+        options = []
+
     if master is None:
         raise ValueError("Expected a master")
 
@@ -640,7 +778,6 @@ def start_MAVProxy_SITL(atype,
     if old is not None:
         env['PYTHONPATH'] += os.path.pathsep + old
 
-    global close_list
     cmd = []
     cmd.append(mavproxy_cmd())
     cmd.extend(['--master', master])
@@ -656,7 +793,7 @@ def start_MAVProxy_SITL(atype,
     print("PYTHONPATH: %s" % str(env['PYTHONPATH']))
     print("Running: %s" % cmd_as_shell(cmd))
 
-    ret = pexpect.spawn(cmd[0], cmd[1:], logfile=logfile, encoding=ENCODING, timeout=pexpect_timeout, env=env)
+    ret = pexpect.spawn(cmd[0], cmd[1:], logfile=logfile, encoding='ascii', timeout=pexpect_timeout, env=env)
     ret.delaybeforesend = 0
     pexpect_autoclose(ret)
     return ret
@@ -665,12 +802,11 @@ def start_MAVProxy_SITL(atype,
 def start_PPP_daemon(ips, sockaddr):
     """Start pppd for networking"""
 
-    global close_list
     cmd = "sudo pppd socket %s debug noauth nodetach %s" % (sockaddr, ips)
     cmd = cmd.split()
     print("Running: %s" % cmd_as_shell(cmd))
 
-    ret = pexpect.spawn(cmd[0], cmd[1:], logfile=sys.stdout, encoding=ENCODING, timeout=30)
+    ret = pexpect.spawn(cmd[0], cmd[1:], logfile=sys.stdout, encoding='ascii', timeout=30)
     ret.delaybeforesend = 0
     pexpect_autoclose(ret)
     return ret
@@ -747,7 +883,12 @@ def gps_newpos(lat, lon, bearing, distance):
     """Extrapolate latitude/longitude given a heading and distance
     thanks to http://www.movable-type.co.uk/scripts/latlong.html .
     """
-    from math import sin, asin, cos, atan2, radians, degrees
+    from math import asin
+    from math import atan2
+    from math import cos
+    from math import degrees
+    from math import radians
+    from math import sin
 
     lat1 = radians(lat)
     lon1 = radians(lon)
@@ -805,23 +946,17 @@ def constrain(value, minv, maxv):
 def load_local_module(fname):
     """load a python module from within the ardupilot tree"""
     fname = os.path.join(topdir(), fname)
-    if sys.version_info.major >= 3:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("local_module", fname)
-        ret = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ret)
-    else:
-        import imp
-        ret = imp.load_source("local_module", fname)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("local_module", fname)
+    ret = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ret)
     return ret
 
 
 def get_git_hash(short=False):
     short_v = "--short=8 " if short else ""
     githash = run_cmd(f'git rev-parse {short_v}HEAD', output=True, directory=reltopdir('.')).strip()
-    if sys.version_info.major >= 3:
-        githash = githash.decode('utf-8')
-    return githash
+    return githash.decode('utf-8')
 
 
 if __name__ == "__main__":

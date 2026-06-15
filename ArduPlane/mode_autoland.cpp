@@ -162,7 +162,7 @@ bool ModeAutoLand::_enter()
 #else
         const bool use_terrain = false;
 #endif
-        const float dist_to_climb = terrain_alt_min - plane.relative_ground_altitude(plane.g.rangefinder_landing, use_terrain);
+        const float dist_to_climb = terrain_alt_min - plane.relative_ground_altitude(RangeFinderUse::CLIMB, use_terrain);
         if (is_positive(dist_to_climb)) {
             // Copy loiter and update target altitude to current altitude plus climb altitude
             cmd_climb = cmd_loiter;
@@ -177,7 +177,7 @@ bool ModeAutoLand::_enter()
 #if AP_TERRAIN_AVAILABLE
     // Update loiter location to be relative terrain if enabled
     if (plane.terrain_enabled_in_current_mode()) {
-        cmd_loiter.content.location.terrain_alt = 1;
+        cmd_loiter.content.location.set_alt_m(final_wp_alt, Location::AltFrame::ABOVE_TERRAIN);
     };
 #endif
     // land WP at home
@@ -224,7 +224,7 @@ void ModeAutoLand::navigate()
         plane.update_loiter(cmd_climb.p1);
 
         ftype dist;
-        if (plane.reached_loiter_target() || !cmd_climb.content.location.get_alt_distance(plane.current_loc, dist) || (dist < fast_climb_extra_alt)) {
+        if (plane.reached_loiter_target() || !cmd_climb.content.location.get_height_above(plane.current_loc, dist) || (dist < fast_climb_extra_alt)) {
             // Reached destination or Climb is done, move onto loiter
             plane.auto_state.next_wp_crosstrack = true;
             stage = AutoLandStage::LOITER;
@@ -279,7 +279,7 @@ void ModeAutoLand::check_takeoff_direction()
     }
 }
 
-// Sets autoland direction using ground course + offest parameter
+// Sets autoland direction using ground course + offset parameter
 void ModeAutoLand::set_autoland_direction(const float heading)
 {
     plane.takeoff_state.initial_direction.heading = wrap_360(heading);
@@ -301,7 +301,7 @@ bool ModeAutoLand::landing_lined_up(void)
 void ModeAutoLand::arm_check(void)
 {
     if (plane.ahrs.use_compass() && autoland_option_is_set(ModeAutoLand::AutoLandOption::AUTOLAND_DIR_ON_ARM)) {
-        set_autoland_direction(plane.ahrs.yaw_sensor * 0.01);
+        set_autoland_direction(plane.ahrs.get_yaw_deg());
     }
 }
 

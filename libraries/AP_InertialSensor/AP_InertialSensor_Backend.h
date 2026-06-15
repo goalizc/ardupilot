@@ -90,7 +90,7 @@ public:
     // get a startup banner to output to the GCS
     virtual bool get_output_banner(char* banner, uint8_t banner_len) { return false; }
 
-#if HAL_EXTERNAL_AHRS_ENABLED
+#if AP_EXTERNAL_AHRS_ENABLED
     virtual void handle_external(const AP_ExternalAHRS::ins_data_message_t &pkt) {}
 #endif
 
@@ -100,6 +100,31 @@ public:
     bool has_been_killed(uint8_t instance) const { return false; }
 #endif
 
+    // get the backend update rate for the gyro in Hz
+    // if the backend polling rate is the same as the sample rate or higher, return raw sample rate
+    // override and return the backend rate in Hz if it is lower than the sample rate
+    virtual uint16_t get_gyro_backend_rate_hz() const {
+        return _gyro_raw_sample_rate(gyro_instance);
+    }
+
+    // return the maximum allowed gyro bias for this sensor (rad/s).
+    // The EKF clamps its gyro bias state to this value.
+    virtual float gyro_bias_limit_rads() const {
+        return 0.5f;
+    }
+
+    // return the initial 1-sigma gyro bias uncertainty for this sensor (deg/s)
+    virtual float gyro_bias_init_dps() const {
+        return 2.5f;
+    }
+
+    uint8_t get_gyro_instance() const {
+        return gyro_instance;
+    }
+
+    uint8_t get_accel_instance() const {
+        return accel_instance;
+    }
 
     /*
       device driver IDs. These are used to fill in the devtype field
@@ -146,6 +171,10 @@ public:
         DEVTYPE_INS_ICM45686 = 0x3B,
         DEVTYPE_INS_SCHA63T  = 0x3C,
         DEVTYPE_INS_IIM42653 = 0x3D,
+        DEVTYPE_INS_LSM6DSV  = 0x3E,
+        DEVTYPE_INS_ASM330   = 0x3F,
+        DEVTYPE_INS_ADIS16607 = 0x40,
+        DEVTYPE_INS_ZEROONE_FPGA_SCH16T = 0x41,
     };
 
 protected:
@@ -305,14 +334,6 @@ protected:
 
     void set_accel_orientation(uint8_t instance, enum Rotation rotation) {
         _imu._accel_orientation[instance] = rotation;
-    }
-
-    uint8_t get_gyro_instance() const {
-        return gyro_instance;
-    }
-
-    uint8_t get_accel_instance() const {
-        return accel_instance;
     }
 
     // increment clipping counted. Used by drivers that do decimation before supplying

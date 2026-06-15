@@ -51,7 +51,6 @@
 #include <AP_Relay/AP_Relay.h>           // APM relay
 #include <AP_Mount/AP_Mount.h>           // Camera/Antenna mount
 #include <AP_Vehicle/AP_Vehicle.h>         // needed for AHRS build
-#include <AP_InertialNav/AP_InertialNav.h>     // inertial navigation library
 #include <AC_WPNav/AC_WPNav.h>           // Waypoint navigation library
 #include <AC_WPNav/AC_Loiter.h>
 #include <AC_WPNav/AC_Circle.h>          // circle navigation library
@@ -63,6 +62,7 @@
 #include <AP_LeakDetector/AP_LeakDetector.h> // Leak detector
 #include <AP_Proximity/AP_Proximity.h>
 #include <AP_Rally/AP_Rally.h>
+#include <AP_OSD/AP_OSD.h>
 
 // Local modules
 #include "defines.h"
@@ -74,6 +74,7 @@
 #include "GCS_Sub.h"
 #include "mode.h"
 #include "script_button.h"
+
 
 #include <AP_OpticalFlow/AP_OpticalFlow.h>     // Optical Flow library
 
@@ -106,6 +107,7 @@ public:
     friend class ParametersG2;
     friend class AP_Arming_Sub;
     friend class RC_Channels_Sub;
+    friend class RC_Channel_Sub;
     friend class Mode;
     friend class ModeManual;
     friend class ModeStabilize;
@@ -126,9 +128,6 @@ protected:
     bool should_zero_rc_outputs_on_reboot() const override { return true; }
 
 private:
-
-    // key aircraft parameters passed to multiple libraries
-    AP_MultiCopter aparm;
 
     // Global parameters are all contained within the 'g' class.
     Parameters g;
@@ -156,10 +155,6 @@ private:
         LowPassFilterFloat alt_filt;         // altitude filter
     } rangefinder_state = { false, false, 0, 0, 0, 0, 0, 0 };
 
-#if AP_RPM_ENABLED
-    AP_RPM rpm_sensor;
-#endif
-
     // Mission library
     AP_Mission mission{
             FUNCTOR_BIND_MEMBER(&Sub::start_command, bool, const AP_Mission::Mission_Command &),
@@ -169,6 +164,10 @@ private:
     // Optical flow sensor
 #if AP_OPTICALFLOW_ENABLED
     AP_OpticalFlow optflow;
+#endif
+
+#if OSD_ENABLED || OSD_PARAM_ENABLED
+    AP_OSD osd;
 #endif
 
     // system time in milliseconds of last recorded yaw reset from ekf
@@ -219,6 +218,10 @@ private:
         uint32_t terrain_last_failure_ms;   // the most recent time terrain data access failed
         uint32_t last_crash_warn_ms; // last time a crash warning was sent to gcs
         uint32_t last_ekf_warn_ms; // last time an ekf warning was sent to gcs
+#if AP_SUB_RC_ENABLED
+        int8_t radio_counter;            // number of iterations with throttle below throttle_fs_value
+        uint8_t radio               : 1; // A status flag for the radio failsafe
+#endif    
 
         uint8_t pilot_input          : 1; // true if pilot input failsafe is active, handles things like joystick being disconnected during operation
         uint8_t gcs                  : 1; // A status flag for the ground station failsafe
@@ -278,10 +281,6 @@ private:
 
     AP_Arming_Sub arming;
 
-    // Altitude
-    // The cm/s we are moving up or down based on filtered data - Positive = UP
-    int16_t climb_rate;
-
     // Turn counter
     int32_t quarter_turn_count;
     uint8_t last_turn_state;
@@ -326,9 +325,6 @@ private:
     // Delay Mission Scripting Command
     int32_t condition_value;  // used in condition commands (eg delay, change alt, etc.)
     uint32_t condition_start;
-
-    // Inertial Navigation
-    AP_InertialNav inertial_nav;
 
     AP_AHRS_View ahrs_view;
 
@@ -378,7 +374,7 @@ private:
     // setup the var_info table
     AP_Param param_loader;
 
-    uint32_t last_pilot_heading;
+    float last_pilot_heading_rad;
     uint32_t last_pilot_yaw_input_ms;
     uint32_t fs_terrain_recover_start_ms;
 
@@ -432,14 +428,12 @@ private:
     void userhook_SlowLoop();
     void userhook_SuperSlowLoop();
     void update_home_from_EKF();
-    void set_home_to_current_location_inflight();
     bool set_home_to_current_location(bool lock) override WARN_IF_UNUSED;
     bool set_home(const Location& loc, bool lock) override WARN_IF_UNUSED;
     float get_alt_rel() const WARN_IF_UNUSED;
     float get_alt_msl() const WARN_IF_UNUSED;
     void exit_mission();
     void set_origin(const Location& loc);
-    bool ensure_ekf_origin();
     bool verify_loiter_unlimited();
     bool verify_loiter_time();
     bool verify_wait_delay();
@@ -458,7 +452,10 @@ private:
     void failsafe_terrain_on_event();
     void mainloop_failsafe_enable();
     void mainloop_failsafe_disable();
+#if AP_FENCE_ENABLED
     void fence_check();
+    void fence_checks_async() override;
+#endif
     bool set_mode(Mode::Number mode, ModeReason reason);
     bool set_mode(const uint8_t new_mode, const ModeReason reason) override;
     uint8_t get_mode() const override { return (uint8_t)control_mode; }
@@ -472,6 +469,16 @@ private:
     void motors_output();
     void init_rc_in();
     void init_rc_out();
+#if AP_SUB_RC_ENABLED
+    void rc_loop(); 
+    void read_radio();  
+        // last valid RC input time
+    uint32_t last_radio_update_ms;
+    void set_failsafe_radio(bool b);
+    void set_throttle_and_failsafe(uint16_t throttle_pwm);
+    void failsafe_radio_off_event();
+    void failsafe_radio_on_event();
+#endif
     void enable_motor_output();
     void init_joystick();
     void transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t z, int16_t r, uint16_t buttons, uint16_t buttons2, uint8_t enabled_extensions,
@@ -488,6 +495,7 @@ private:
     JSButton* get_button(uint8_t index);
     void default_js_buttons(void);
     void clear_input_hold();
+    bool jsbutton_function_is_assigned(JSButton::button_function_t function);
     void read_barometer(void);
     void init_rangefinder(void);
     void read_rangefinder(void);
@@ -551,6 +559,16 @@ private:
     uint16_t get_pilot_speed_dn() const;
 
     void convert_old_parameters(void);
+
+#if LEAKDETECTOR_MAX_INSTANCES > 0
+    void update_leak_pins();
+#endif
+#if AP_RELAY_ENABLED
+    void update_relay_pins();
+#endif
+
+    void update_actuators_from_jsbuttons();
+    void update_lights_from_rcin();
     bool handle_do_motor_test(mavlink_command_int_t command);
     bool init_motor_test();
     bool verify_motor_test();

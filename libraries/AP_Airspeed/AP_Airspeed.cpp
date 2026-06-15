@@ -70,13 +70,16 @@ extern const AP_HAL::HAL &hal;
  #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
   #define ARSPD_DEFAULT_TYPE TYPE_ANALOG
   #define ARSPD_DEFAULT_PIN 1
- #else
+ #elif AP_AIRSPEED_MS4525_ENABLED
   #define ARSPD_DEFAULT_TYPE TYPE_I2C_MS4525
   #ifdef HAL_DEFAULT_AIRSPEED_PIN
       #define ARSPD_DEFAULT_PIN HAL_DEFAULT_AIRSPEED_PIN
   #else
      #define ARSPD_DEFAULT_PIN 15
   #endif
+ #else
+ #define ARSPD_DEFAULT_TYPE TYPE_NONE
+ #define ARSPD_DEFAULT_PIN 15
  #endif //CONFIG_HAL_BOARD
 #else   // All Other Vehicle Types
  #define ARSPD_DEFAULT_TYPE TYPE_NONE
@@ -116,7 +119,7 @@ const AP_Param::GroupInfo AP_Airspeed::var_info[] = {
     // @Param: _PRIMARY
     // @DisplayName: Primary airspeed sensor
     // @Description: This selects which airspeed sensor will be the primary if multiple sensors are found
-    // @Values: 0:FirstSensor,1:2ndSensor
+    // @Values: 0:FirstSensor, 1:2nd Sensor, 2:3rd Sensor, 3:4th Sensor, 4:5th Sensor, 5:6th Sensor
     // @User: Advanced
     AP_GROUPINFO("_PRIMARY", 10, AP_Airspeed, primary_sensor, 0),
 #endif
@@ -134,7 +137,7 @@ const AP_Param::GroupInfo AP_Airspeed::var_info[] = {
 
     // @Param: _WIND_MAX
     // @DisplayName: Maximum airspeed and ground speed difference
-    // @Description: If the difference between airspeed and ground speed is greater than this value the sensor will be marked unhealthy. Using ARSPD_OPTION this health value can be used to disable the sensor.
+    // @Description: If the difference between airspeed and ground speed is greater than this value the sensor will be marked unhealthy. Using ARSPD_OPTIONS this health value can be used to disable the sensor.
     // @Description{Copter, Blimp, Rover, Sub}: This parameter and function is not used by this vehicle. Always set to 0.
     // @Units: m/s
     // @User: Advanced
@@ -156,7 +159,7 @@ const AP_Param::GroupInfo AP_Airspeed::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("_WIND_GATE", 26, AP_Airspeed, _wind_gate, 5.0f),
     
-    // @Param: _OFF_PCNT
+    // @Param{Plane}: _OFF_PCNT
     // @DisplayName: Maximum offset cal speed error 
     // @Description: The maximum percentage speed change in airspeed reports that is allowed due to offset changes between calibrations before a warning is issued. This potential speed error is in percent of AIRSPEED_MIN. 0 disables. Helps warn of calibrations without pitot being covered.
     // @Range: 0.0 10.0
@@ -177,6 +180,30 @@ const AP_Param::GroupInfo AP_Airspeed::var_info[] = {
 #endif
 
     // index 30 is used by enable at the top of the table
+
+#if AIRSPEED_MAX_SENSORS > 2
+    // @Group: 3_
+    // @Path: AP_Airspeed_Params.cpp
+    AP_SUBGROUPINFO(param[2], "3_", 31, AP_Airspeed, AP_Airspeed_Params),
+#endif
+
+#if AIRSPEED_MAX_SENSORS > 3
+    // @Group: 4_
+    // @Path: AP_Airspeed_Params.cpp
+    AP_SUBGROUPINFO(param[3], "4_", 32, AP_Airspeed, AP_Airspeed_Params),
+#endif
+
+#if AIRSPEED_MAX_SENSORS > 4
+    // @Group: 5_
+    // @Path: AP_Airspeed_Params.cpp
+    AP_SUBGROUPINFO(param[4], "5_", 33, AP_Airspeed, AP_Airspeed_Params),
+#endif
+
+#if AIRSPEED_MAX_SENSORS > 5
+    // @Group: 6_
+    // @Path: AP_Airspeed_Params.cpp
+    AP_SUBGROUPINFO(param[5], "6_", 34, AP_Airspeed, AP_Airspeed_Params),
+#endif
 
     AP_GROUPEND
 };
@@ -313,6 +340,9 @@ void AP_Airspeed::init()
 
     convert_per_instance();
 
+    // Set primary from parameter to avoid primary changed message at boot
+    primary = primary_sensor.get();
+
 #if ENABLE_PARAMETER
     // if either type is set then enable if not manually set
     if (!_enable.configured() && ((param[0].type.get() != TYPE_NONE) || (param[1].type.get() != TYPE_NONE))) {
@@ -355,108 +385,96 @@ void AP_Airspeed::allocate()
         case TYPE_NONE:
             // nothing to do
             break;
-        case TYPE_I2C_MS4525:
 #if AP_AIRSPEED_MS4525_ENABLED
+        case TYPE_I2C_MS4525:
             sensor[i] = NEW_NOTHROW AP_Airspeed_MS4525(*this, i);
-#endif
             break;
-        case TYPE_SITL:
+#endif  // AP_AIRSPEED_MS4525_ENABLED
 #if AP_AIRSPEED_SITL_ENABLED
+        case TYPE_SITL:
             sensor[i] = NEW_NOTHROW AP_Airspeed_SITL(*this, i);
-#endif
             break;
-        case TYPE_ANALOG:
+#endif  // AP_AIRSPEED_SITL_ENABLED
 #if AP_AIRSPEED_ANALOG_ENABLED
+        case TYPE_ANALOG:
             sensor[i] = NEW_NOTHROW AP_Airspeed_Analog(*this, i);
-#endif
             break;
+#endif  // AP_AIRSPEED_ANALOG_ENABLED
+#if AP_AIRSPEED_MS5525_ENABLED
         case TYPE_I2C_MS5525:
-#if AP_AIRSPEED_MS5525_ENABLED
             sensor[i] = NEW_NOTHROW AP_Airspeed_MS5525(*this, i, AP_Airspeed_MS5525::MS5525_ADDR_AUTO);
-#endif
             break;
+#endif  // AP_AIRSPEED_MS5525_ENABLED
+#if AP_AIRSPEED_MS5525_ENABLED
         case TYPE_I2C_MS5525_ADDRESS_1:
-#if AP_AIRSPEED_MS5525_ENABLED
             sensor[i] = NEW_NOTHROW AP_Airspeed_MS5525(*this, i, AP_Airspeed_MS5525::MS5525_ADDR_1);
-#endif
             break;
-        case TYPE_I2C_MS5525_ADDRESS_2:
+#endif  // AP_AIRSPEED_MS5525_ENABLED
 #if AP_AIRSPEED_MS5525_ENABLED
+        case TYPE_I2C_MS5525_ADDRESS_2:
             sensor[i] = NEW_NOTHROW AP_Airspeed_MS5525(*this, i, AP_Airspeed_MS5525::MS5525_ADDR_2);
-#endif
             break;
-        case TYPE_I2C_SDP3X:
+#endif  // AP_AIRSPEED_MS5525_ENABLED
 #if AP_AIRSPEED_SDP3X_ENABLED
+        case TYPE_I2C_SDP3X:
             sensor[i] = NEW_NOTHROW AP_Airspeed_SDP3X(*this, i);
-#endif
             break;
-        case TYPE_I2C_DLVR_5IN:
+#endif  // AP_AIRSPEED_SDP3X_ENABLED
 #if AP_AIRSPEED_DLVR_ENABLED
+        case TYPE_I2C_DLVR_5IN:
             sensor[i] = NEW_NOTHROW AP_Airspeed_DLVR(*this, i, 5);
-#endif
             break;
         case TYPE_I2C_DLVR_10IN:
-#if AP_AIRSPEED_DLVR_ENABLED
             sensor[i] = NEW_NOTHROW AP_Airspeed_DLVR(*this, i, 10);
-#endif
             break;
         case TYPE_I2C_DLVR_20IN:
-#if AP_AIRSPEED_DLVR_ENABLED
             sensor[i] = NEW_NOTHROW AP_Airspeed_DLVR(*this, i, 20);
-#endif
             break;
         case TYPE_I2C_DLVR_30IN:
-#if AP_AIRSPEED_DLVR_ENABLED
             sensor[i] = NEW_NOTHROW AP_Airspeed_DLVR(*this, i, 30);
-#endif
             break;
         case TYPE_I2C_DLVR_60IN:
-#if AP_AIRSPEED_DLVR_ENABLED
             sensor[i] = NEW_NOTHROW AP_Airspeed_DLVR(*this, i, 60);
+            break;
 #endif  // AP_AIRSPEED_DLVR_ENABLED
-            break;
-        case TYPE_I2C_ASP5033:
 #if AP_AIRSPEED_ASP5033_ENABLED
+        case TYPE_I2C_ASP5033:
             sensor[i] = NEW_NOTHROW AP_Airspeed_ASP5033(*this, i);
-#endif
             break;
-        case TYPE_UAVCAN:
+#endif  // AP_AIRSPEED_ASP5033_ENABLED
 #if AP_AIRSPEED_DRONECAN_ENABLED
+        case TYPE_UAVCAN:
             sensor[i] = AP_Airspeed_DroneCAN::probe(*this, i, uint32_t(param[i].bus_id.get()));
-#endif
             break;
-        case TYPE_NMEA_WATER:
+#endif  // AP_AIRSPEED_DRONECAN_ENABLED
 #if AP_AIRSPEED_NMEA_ENABLED
+        case TYPE_NMEA_WATER:
 #if APM_BUILD_TYPE(APM_BUILD_Rover) || APM_BUILD_TYPE(APM_BUILD_ArduSub) 
             sensor[i] = NEW_NOTHROW AP_Airspeed_NMEA(*this, i);
 #endif
-#endif
             break;
-        case TYPE_MSP:
+#endif  // AP_AIRSPEED_NMEA_ENABLED
 #if AP_AIRSPEED_MSP_ENABLED
+        case TYPE_MSP:
             sensor[i] = NEW_NOTHROW AP_Airspeed_MSP(*this, i, 0);
-#endif
             break;
-        case TYPE_EXTERNAL:
+#endif  // AP_AIRSPEED_MSP_ENABLED
 #if AP_AIRSPEED_EXTERNAL_ENABLED
+        case TYPE_EXTERNAL:
             sensor[i] = NEW_NOTHROW AP_Airspeed_External(*this, i);
-#endif
             break;
-        case TYPE_AUAV_5IN:
+#endif  // AP_AIRSPEED_EXTERNAL_ENABLED
 #if AP_AIRSPEED_AUAV_ENABLED
+        case TYPE_AUAV_5IN:
             sensor[i] = NEW_NOTHROW AP_Airspeed_AUAV(*this, i, 5);
-#endif
             break;
         case TYPE_AUAV_10IN:
-#if AP_AIRSPEED_AUAV_ENABLED
             sensor[i] = NEW_NOTHROW AP_Airspeed_AUAV(*this, i, 10);
-#endif
             break;
         case TYPE_AUAV_30IN:
-#if AP_AIRSPEED_AUAV_ENABLED
             sensor[i] = NEW_NOTHROW AP_Airspeed_AUAV(*this, i, 30);
-#endif
             break;
+#endif  // AP_AIRSPEED_AUAV_ENABLED
         }
         if (sensor[i] && !sensor[i]->init()) {
             GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Airspeed %u init failed", i + 1);
@@ -494,7 +512,7 @@ void AP_Airspeed::allocate()
 }
 
 // get a temperature reading if possible
-bool AP_Airspeed::get_temperature(uint8_t i, float &temperature)
+bool AP_Airspeed::get_temperature(uint8_t i, float &temperature) const
 {
     if (!enabled(i)) {
         return false;
@@ -694,6 +712,81 @@ void AP_Airspeed::read(uint8_t i)
 #endif // HAL_BUILD_AP_PERIPH
 }
 
+// Select primary sensor based on user parameters and health
+uint8_t AP_Airspeed::select_primary()
+{
+    // user selected primary from parameter, track changes
+    const uint8_t user_primary = primary_sensor.get();
+    const bool user_primary_changed = user_primary != last_user_primary;
+    last_user_primary = user_primary;
+
+    // If user selected instance is both healthy and set to use then it is a valid primary
+    const bool user_healthy = healthy(user_primary);
+    const bool user_healthy_and_use = user_healthy && use(user_primary);
+
+    if ((user_primary_changed || !hal.util->get_soft_armed()) && user_healthy_and_use) {
+        /*
+            If user selected primary is healthy and set to use then:
+                Always change when the user changes the parameter.
+                Always change if disarmed, if armed its better to stick with the current sensor to avoid needless switching.
+
+            The EKF3 innovation check only applies to the active sensor so a bad sensor will appear good after some time because
+            the EKF is no longer using the sensor so cannot provide feedback.
+
+            We can't just stick with the current primary when disarmed due to variation in detection time.
+        */
+        return user_primary;
+    }
+
+    // If the currently selected primary is valid there is no need to change
+    const bool primary_healthy = healthy(primary);
+    if (primary_healthy && use(primary)) {
+        return primary;
+    }
+
+    if (user_healthy_and_use) {
+        // The current primary is not valid, try the user set primary first
+        return user_primary;
+    }
+
+    // Select the first sensor which is both healthy and set to use
+    for (uint8_t i=0; i<AIRSPEED_MAX_SENSORS; i++) {
+        if ((i == primary) || (i == user_primary)) {
+            // No need to re-check current/user primary
+            continue;
+        }
+        if (healthy(i) && use(i)) {
+            return i;
+        }
+    }
+
+    // No sensor is both healthy and set to use
+
+    // Continue with current primary if healthy
+    if (primary_healthy) {
+        return primary;
+    }
+
+    // Use user selected instance if healthy
+    if (user_healthy) {
+        return user_primary;
+    }
+
+    // Select the first sensor which is healthy
+    for (uint8_t i=0; i<AIRSPEED_MAX_SENSORS; i++) {
+        if ((i == primary) || (i == user_primary)) {
+            // No need to re-check current/user primary
+            continue;
+        }
+        if (healthy(i)) {
+            return i;
+        }
+    }
+
+    // No healthy sensor, don't change primary
+    return primary;
+}
+
 // read all airspeed sensors
 void AP_Airspeed::update()
 {
@@ -712,23 +805,18 @@ void AP_Airspeed::update()
     }
 #endif
 
-#if HAL_LOGGING_ENABLED
-    const uint8_t old_primary = primary;
-#endif
-
-    // setup primary
-    if (healthy(primary_sensor.get())) {
-        primary = primary_sensor.get();
-    } else {
-        for (uint8_t i=0; i<AIRSPEED_MAX_SENSORS; i++) {
-            if (healthy(i)) {
-                primary = i;
-                break;
-            }
-        }
-    }
-
+    // Check for failures possibly marking sensors and unhealthy
     check_sensor_failures();
+
+    // Record old primary sensor for reporting
+    const uint8_t old_primary = primary;
+
+    // Select primary sensor based on user parameters and health
+    primary = select_primary();
+
+    if (primary != old_primary) {
+        GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "Airspeed primary changed: %i", primary+1);
+    }
 
 #if HAL_LOGGING_ENABLED
     if (primary != old_primary) {
@@ -996,6 +1084,20 @@ bool AP_Airspeed::arming_checks(size_t buflen, char *buffer) const
         }
     }
 
+
+    // If the primary sensor is marked to not use then user should either:
+    // - change primary to a sensor which is marked to to use
+    // - allow using the primary
+    // If no sensors are marked for use then the check passes
+    if (!use(primary_sensor.get())) {
+        for (uint8_t i=0; i<AIRSPEED_MAX_SENSORS; i++) {
+            if (use(i)) {
+                hal.util->snprintf(buffer, buflen, "not using Primary (%i)", primary_sensor.get() + 1);
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 #endif
@@ -1004,7 +1106,7 @@ bool AP_Airspeed::arming_checks(size_t buflen, char *buffer) const
 const AP_Param::GroupInfo AP_Airspeed::var_info[] = { AP_GROUPEND };
 
 void AP_Airspeed::update() {};
-bool AP_Airspeed::get_temperature(uint8_t i, float &temperature) { return false; }
+bool AP_Airspeed::get_temperature(uint8_t i, float &temperature) const { return false; }
 void AP_Airspeed::calibrate(bool in_startup) {}
 AP_Airspeed::CalibrationState AP_Airspeed::get_calibration_state() const { return CalibrationState::NOT_STARTED; }
 bool AP_Airspeed::use(uint8_t i) const { return false; }

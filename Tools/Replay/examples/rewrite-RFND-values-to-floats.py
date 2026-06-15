@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+
 '''In ArduPilot 4.7 the distance values were moved to float to
 facilitate supporting rangefinders with more than 327m of range.
 
@@ -10,9 +11,9 @@ that older logs can be replayed with newer code.
 AP_FLAKE8_CLEAN
 '''
 
-from argparse import ArgumentParser
-
 import struct
+
+from argparse import ArgumentParser
 
 from pymavlink import DFReader
 from pymavlink import mavutil
@@ -27,10 +28,11 @@ class Rewrite():
         self.rewrite_fmtu = rewrite_fmtu
         self.rewrite_instance = rewrite_instance
 
+    @staticmethod
     def format_to_struct(fmt):
         ret = bytes("<", 'ascii')
         for c in fmt:
-            (s, mul, type) = DFReader.FORMAT_TO_STRUCT[c]
+            (s, _mul, _type) = DFReader.FORMAT_TO_STRUCT[c]
             ret += bytes(s, 'ascii')
         return bytes(ret)
 
@@ -98,7 +100,6 @@ parser.add_argument("logout")
 args = parser.parse_args()
 
 login = mavutil.mavlink_connection(args.login)
-output = open(args.logout, mode='wb')
 
 type_name_map = {}
 
@@ -125,8 +126,9 @@ def rewrite_message(m):
     return buf
 
 
-while True:
-    m = login.recv_msg()
-    if m is None:
-        break
-    output.write(rewrite_message(m))
+with open(args.logout, mode='wb') as out_file:
+    while True:
+        m = login.recv_msg()
+        if m is None:
+            break
+        out_file.write(rewrite_message(m))

@@ -66,8 +66,8 @@ static const uint32_t bus_clocks[6] = {
 static const struct SPIDriverInfo {
     SPIDriver *driver;
     uint8_t busid; // used for device IDs in parameters
-    uint8_t dma_channel_rx;
     uint8_t dma_channel_tx;
+    uint8_t dma_channel_rx;
     ioline_t sck_line;
 } spi_devices[] = { HAL_SPI_BUS_LIST };
 
@@ -81,8 +81,8 @@ SPIBus::SPIBus(uint8_t _bus) :
     chMtxObjectInit(&dma_lock);
 
     // allow for sharing of DMA channels with other peripherals
-    dma_handle = NEW_NOTHROW Shared_DMA(spi_devices[bus].dma_channel_rx,
-                                spi_devices[bus].dma_channel_tx,
+    dma_handle = NEW_NOTHROW Shared_DMA(spi_devices[bus].dma_channel_tx,
+                                spi_devices[bus].dma_channel_rx,
                                 FUNCTOR_BIND_MEMBER(&SPIBus::dma_allocate, void, Shared_DMA *),
                                 FUNCTOR_BIND_MEMBER(&SPIBus::dma_deallocate, void, Shared_DMA *));
 
@@ -292,6 +292,7 @@ bool SPIDevice::transfer(const uint8_t *send, uint32_t send_len,
     if (!bus.semaphore.check_owner()) {
         return false;
     }
+    // callers should prefer transfer_fullduplex() to relying on this semantic
     if ((send_len == recv_len && send == recv) || !send || !recv) {
         // simplest cases, needed for DMA
         return do_transfer(send, recv, recv_len?recv_len:send_len);
@@ -322,6 +323,14 @@ bool SPIDevice::transfer_fullduplex(const uint8_t *send, uint8_t *recv, uint32_t
         memcpy(recv, buf, len);
     }
     return ret;
+}
+
+bool SPIDevice::transfer_fullduplex(uint8_t *send_recv, uint32_t len)
+{
+    if (!bus.semaphore.check_owner()) {
+        return false;
+    }
+    return do_transfer(send_recv, send_recv, len);
 }
 
 AP_HAL::Semaphore *SPIDevice::get_semaphore()

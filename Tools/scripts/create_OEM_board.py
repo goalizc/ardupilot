@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """
 script to automatically create a copy of a board for an OEM setup
@@ -7,11 +7,10 @@ usage example : ./Tools/scripts/create_OEM_board.py mRoPixracerPro mRoPixracerPr
 AP_FLAKE8_CLEAN
 """
 
-import sys
 import os
-import subprocess
-
 import pathlib
+import subprocess
+import sys
 
 sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), '../../libraries/AP_HAL_ChibiOS/hwdef/scripts'))
 import chibios_hwdef  # noqa

@@ -71,7 +71,6 @@ define HAL_PERIPH_LISTEN_FOR_SERIAL_UART_REBOOT_CMD_PORT 0
 PA13 JTMS-SWDIO SWD
 PA14 JTCK-SWCLK SWD
 
-define HAL_NO_GPIO_IRQ
 define DMA_RESERVE_SIZE 0
 
 # stack for fast interrupts
@@ -103,4 +102,3 @@ define HAL_AIRSPEED_TYPE_DEFAULT 1
 # to uncompress the bootloader at runtime
 env ROMFS_UNCOMPRESSED True
 
-define HAL_RCIN_THREAD_ENABLED 1

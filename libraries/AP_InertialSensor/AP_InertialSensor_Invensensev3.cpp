@@ -130,12 +130,14 @@ extern const AP_HAL::HAL& hal;
 
 // ICM42xxx specific registers
 #define INV3REG_42XXX_INTF_CONFIG1  0x4d
+#define INV3REG_42XXX_INTF_CONFIG5  0x7b    // bank1
 
 // WHOAMI values
 #define INV3_ID_ICM40605      0x33
 #define INV3_ID_ICM40609      0x3b
 #define INV3_ID_ICM42605      0x42
-#define INV3_ID_ICM42688      0x47
+#define INV3_ID_ICM42688_P    0x47
+#define INV3_ID_ICM42688_V    0xDB
 #define INV3_ID_IIM42652      0x6f
 #define INV3_ID_IIM42653      0x56
 #define INV3_ID_ICM42670      0x67
@@ -254,6 +256,43 @@ void AP_InertialSensor_Invensensev3::fifo_reset()
     notify_gyro_fifo_reset(gyro_instance);
 }
 
+// see header for the per-variant rationale and datasheet references
+float AP_InertialSensor_Invensensev3::gyro_bias_limit_rads() const
+{
+    switch (inv3_type) {
+    case Invensensev3_Type::ICM42688:
+    case Invensensev3_Type::ICM45686:
+        return radians(2.0f);
+    case Invensensev3_Type::ICM42605:
+    case Invensensev3_Type::ICM40609:
+    case Invensensev3_Type::ICM42670:
+    case Invensensev3_Type::IIM42652:
+        return radians(3.0f);
+    case Invensensev3_Type::ICM40605:
+    case Invensensev3_Type::IIM42653:
+        break;
+    }
+    return AP_InertialSensor_Backend::gyro_bias_limit_rads();
+}
+
+float AP_InertialSensor_Invensensev3::gyro_bias_init_dps() const
+{
+    switch (inv3_type) {
+    case Invensensev3_Type::ICM42688:
+    case Invensensev3_Type::ICM45686:
+        return 1.0f;
+    case Invensensev3_Type::ICM42605:
+    case Invensensev3_Type::ICM40609:
+    case Invensensev3_Type::ICM42670:
+    case Invensensev3_Type::IIM42652:
+        return 1.5f;
+    case Invensensev3_Type::ICM40605:
+    case Invensensev3_Type::IIM42653:
+        break;
+    }
+    return AP_InertialSensor_Backend::gyro_bias_init_dps();
+}
+
 void AP_InertialSensor_Invensensev3::start()
 {
     // pre-fetch instance numbers for checking fast sampling settings
@@ -337,6 +376,10 @@ void AP_InertialSensor_Invensensev3::start()
             temp_sensitivity = 1.0 / 128.0;
             accel_scale = ACCEL_SCALE_HIGHRES_32G;
             gyro_scale = GYRO_SCALE_HIGHRES_4000DPS;
+        } else if (inv3_type == Invensensev3_Type::IIM42653) {
+            accel_scale = ACCEL_SCALE_HIGHRES_32G;
+            gyro_scale = GYRO_SCALE_HIGHRES_4000DPS;
+            temp_sensitivity = 1.0 / 132.48;
         } else if (inv3_type == Invensensev3_Type::ICM42670) {
             temp_sensitivity = 1.0 / 128.0;
         }
@@ -599,7 +642,7 @@ void AP_InertialSensor_Invensensev3::read_fifo()
         tfr_buffer[0] = reg_data | BIT_READ_FLAG;
         // transfer will also be sending data, make sure that data is zero
         memset(tfr_buffer + 1, 0, n * fifo_sample_size);
-        if (!dev->transfer(tfr_buffer, n * fifo_sample_size + 1, tfr_buffer, n * fifo_sample_size + 1)) {
+        if (!dev->transfer_fullduplex(tfr_buffer, n * fifo_sample_size + 1)) {
             goto check_registers;
         }
         samples = tfr_buffer + 1;
@@ -869,7 +912,20 @@ void AP_InertialSensor_Invensensev3::set_filter_and_scaling(void)
           producing constant output which causes a DC gyro bias
         */
         const uint8_t v = register_read(INV3REG_42XXX_INTF_CONFIG1);
+#if defined(INVENSENSEV3_CLKIN_BITMASK)
+        uint8_t intf_config1 = (v & 0x3F) | 0x40;
+        // we only support setting RTC mode on IIM42652 now
+        if ((INVENSENSEV3_CLKIN_BITMASK & (1U << gyro_instance)) && (inv3_type == Invensensev3_Type::IIM42652)) {
+            intf_config1 |= 0x04;   // enable RTC mode
+            // setup pin9 function to CLKIN
+            const uint8_t intf_config5 = register_read_bank(1, INV3REG_42XXX_INTF_CONFIG5);
+            register_write_bank(1, INV3REG_42XXX_INTF_CONFIG5, (intf_config5 & ~0x06) | 0x04);
+        }
+
+        register_write(INV3REG_42XXX_INTF_CONFIG1, intf_config1, true);
+#else
         register_write(INV3REG_42XXX_INTF_CONFIG1, (v & 0x3F) | 0x40, true);
+#endif
         break;
     }
     case Invensensev3_Type::ICM40605:
@@ -989,7 +1045,8 @@ bool AP_InertialSensor_Invensensev3::check_whoami(void)
     case INV3_ID_ICM40609:
         inv3_type = Invensensev3_Type::ICM40609;
         return true;
-    case INV3_ID_ICM42688:
+    case INV3_ID_ICM42688_P:
+    case INV3_ID_ICM42688_V:
         inv3_type = Invensensev3_Type::ICM42688;
         return true;
     case INV3_ID_ICM42605:

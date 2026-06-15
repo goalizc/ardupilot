@@ -16,6 +16,9 @@
 #include "SPIDevice.h"
 
 #include <AP_HAL/AP_HAL.h>
+
+#if AP_HAL_SPI_ENABLED
+
 #include <AP_Math/AP_Math.h>
 #include "Scheduler.h"
 #include "Semaphores.h"
@@ -28,9 +31,15 @@ using namespace ESP32;
 
 //#define SPIDEBUG 1
 
-SPIDeviceDesc device_desc[] = {HAL_ESP32_SPI_DEVICES};
+#ifdef HAL_ESP32_SPI_BUSES
 SPIBusDesc bus_desc[] = {HAL_ESP32_SPI_BUSES};
+#endif  // HAL_ESP32_SPI_BUSES
 
+#ifdef HAL_ESP32_SPI_DEVICES
+SPIDeviceDesc device_desc[] = {HAL_ESP32_SPI_DEVICES};
+#endif  // HAL_ESP32_SPI_DEVICES
+
+#ifdef HAL_ESP32_SPI_BUSES
 SPIBus::SPIBus(uint8_t _bus):
     DeviceBus(Scheduler::SPI_PRIORITY), bus(_bus)
 {
@@ -47,7 +56,10 @@ SPIBus::SPIBus(uint8_t _bus):
     };
     spi_bus_initialize(bus_desc[_bus].host, &config, bus_desc[_bus].dma_ch);
 }
+#endif  // HAL_ESP32_SPI_BUSES
 
+
+#ifdef HAL_ESP32_SPI_DEVICES
 SPIDevice::SPIDevice(SPIBus &_bus, SPIDeviceDesc &_device_desc)
     : bus(_bus)
     , device_desc(_device_desc)
@@ -83,6 +95,7 @@ SPIDevice::SPIDevice(SPIBus &_bus, SPIDeviceDesc &_device_desc)
              device_desc.name, 0, (unsigned)device_desc.device);
     printf("spi device constructed %s\n", pname);
 }
+#endif  // HAL_ESP32_SPI_DEVICES
 
 SPIDevice::~SPIDevice()
 {
@@ -112,7 +125,7 @@ bool SPIDevice::transfer(const uint8_t *send, uint32_t send_len,
 #ifdef SPIDEBUG
     printf("%s:%d \n", __PRETTY_FUNCTION__, __LINE__);
 #endif
-    if ((send_len == recv_len && send == recv) || !send || !recv) {
+    if (!send || !recv) {
         // simplest cases
         transfer_fullduplex(send, recv, recv_len?recv_len:send_len);
         return true;
@@ -129,6 +142,11 @@ bool SPIDevice::transfer(const uint8_t *send, uint32_t send_len,
         memcpy(recv, &buf[send_len], recv_len);
     }
     return true;
+}
+
+bool SPIDevice::transfer_fullduplex(uint8_t *send_recv, uint32_t len)
+{
+    return transfer_fullduplex(send_recv, send_recv, len);
 }
 
 bool SPIDevice::transfer_fullduplex(const uint8_t *send, uint8_t *recv, uint32_t len)
@@ -183,6 +201,7 @@ bool SPIDevice::adjust_periodic_callback(AP_HAL::Device::PeriodicHandle h, uint3
     return bus.adjust_timer(h, period_usec);
 }
 
+#ifdef HAL_ESP32_SPI_DEVICES
 AP_HAL::SPIDevice *
 SPIDeviceManager::get_device_ptr(const char *name)
 {
@@ -240,4 +259,6 @@ SPIDeviceManager::get_device_ptr(const char *name)
 
     return NEW_NOTHROW SPIDevice(*busp, desc);
 }
+#endif  // HAL_ESP32_SPI_DEVICES
 
+#endif  // AP_HAL_SPI_ENABLED

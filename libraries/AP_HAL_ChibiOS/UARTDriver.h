@@ -138,6 +138,11 @@ public:
      */
     bool is_dma_enabled() const override { return rx_dma_enabled && tx_dma_enabled; }
 
+    /*
+      check that the current thread owns the uart making certain operations possible
+     */
+    bool is_owned_by_current_thread() const override { return _uart_owner_thd == chThdGetSelfX(); }
+
 private:
     const SerialDef &sdef;
     bool rx_dma_enabled;
@@ -223,7 +228,6 @@ private:
     uint32_t _cr1_options;
     uint32_t _cr2_options;
     uint32_t _cr3_options;
-    uint16_t _last_options;
 
     // half duplex control. After writing we throw away bytes for 4 byte widths to
     // prevent reading our own bytes back

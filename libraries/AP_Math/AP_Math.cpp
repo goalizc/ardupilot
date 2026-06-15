@@ -25,7 +25,7 @@ template <typename Arithmetic1, typename Arithmetic2>
 typename std::enable_if<std::is_floating_point<typename std::common_type<Arithmetic1, Arithmetic2>::type>::value, bool>::type
 is_equal(const Arithmetic1 v_1, const Arithmetic2 v_2)
 {
-#ifdef ALLOW_DOUBLE_MATH_FUNCTIONS
+#if AP_MATH_ALLOW_DOUBLE_FUNCTIONS
     typedef typename std::common_type<Arithmetic1, Arithmetic2>::type common_type;
     typedef typename std::remove_cv<common_type>::type common_type_nonconst;
     if (std::is_same<double, common_type_nonconst>::value) {
@@ -169,7 +169,7 @@ T wrap_180_cd(const T angle)
 template int wrap_180<int>(const int angle);
 template short wrap_180<short>(const short angle);
 template float wrap_180<float>(const float angle);
-#ifdef ALLOW_DOUBLE_MATH_FUNCTIONS
+#if AP_MATH_ALLOW_DOUBLE_FUNCTIONS
 template double wrap_180<double>(const double angle);
 #endif
 
@@ -177,7 +177,7 @@ template int wrap_180_cd<int>(const int angle);
 template long wrap_180_cd<long>(const long angle);
 template short wrap_180_cd<short>(const short angle);
 template float wrap_180_cd<float>(const float angle);
-#ifdef ALLOW_DOUBLE_MATH_FUNCTIONS
+#if AP_MATH_ALLOW_DOUBLE_FUNCTIONS
 template double wrap_180_cd<double>(const double angle);
 #endif
 
@@ -190,7 +190,7 @@ float wrap_360(const float angle)
     return res;
 }
 
-#ifdef ALLOW_DOUBLE_MATH_FUNCTIONS
+#if AP_MATH_ALLOW_DOUBLE_FUNCTIONS
 double wrap_360(const double angle)
 {
     double res = fmod(angle, 360.0);
@@ -219,7 +219,7 @@ float wrap_360_cd(const float angle)
     return res;
 }
 
-#ifdef ALLOW_DOUBLE_MATH_FUNCTIONS
+#if AP_MATH_ALLOW_DOUBLE_FUNCTIONS
 double wrap_360_cd(const double angle)
 {
     double res = fmod(angle, 36000.0);
@@ -248,23 +248,36 @@ long wrap_360_cd(const long angle)
     return res;
 }
 
-ftype wrap_PI(const ftype radian)
+float wrap_2PI(const float radian)
 {
-    ftype res = wrap_2PI(radian);
-    if (res > M_PI) {
-        res -= M_2PI;
+    float res = fmodf(radian, float(M_2PI));
+    if (res < 0) {
+        res += float(M_2PI);
     }
     return res;
 }
 
-ftype wrap_2PI(const ftype radian)
+double wrap_2PI(const double radian)
 {
-    ftype res = fmodF(radian, M_2PI);
+    double res = fmod(radian, M_2PI);
     if (res < 0) {
         res += M_2PI;
     }
     return res;
 }
+
+template <typename T>
+T wrap_PI(const T radian)
+{
+    T res = wrap_2PI(radian);
+    if (res > T(M_PI)) {
+        res -= T(M_2PI);
+    }
+    return res;
+}
+
+template float wrap_PI<float>(const float radian);
+template double wrap_PI<double>(const double radian);
 
 template <typename T>
 T constrain_value_line(const T amt, const T low, const T high, uint32_t line)
@@ -328,6 +341,8 @@ template unsigned short constrain_value<unsigned short>(const unsigned short amt
 template float constrain_value<float>(const float amt, const float low, const float high);
 template double constrain_value<double>(const double amt, const double low, const double high);
 
+template int8_t constrain_value<int8_t>(const int8_t amt, const int8_t low, const int8_t high);
+template uint8_t constrain_value<uint8_t>(const uint8_t amt, const uint8_t low, const uint8_t high);
 
 /*
   simple 16 bit random number generator
@@ -491,7 +506,7 @@ float fixedwing_turn_rate(float bank_angle_deg, float airspeed)
     return degrees(GRAVITY_MSS*tanf(radians(bank_angle_deg))/MAX(airspeed,1));
 }
 
-// convert degrees farenheight to Kelvin
+// convert degrees fahrenheit to Kelvin
 float degF_to_Kelvin(float temp_f)
 {
     return (temp_f + 459.67) * 0.55556;

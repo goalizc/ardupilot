@@ -36,6 +36,11 @@ public:
     static const uint16_t k_format_version = 13;
     //////////////////////////////////////////////////////////////////
 
+    enum class ThrFailsafe {
+        Disabled    = 0,
+        Enabled     = 1,
+        EnabledNoFS = 2
+    };
 
     enum {
         // Layout version number, always key zero.
@@ -136,12 +141,12 @@ public:
         k_param_land_disarm_delay,  // unused - moved to AP_Landing
         k_param_alt_slope_max_height,
         k_param_rudder_only,
-        k_param_gcs3,            // 93
+        k_param_gcs3_unused,               // unused in ArduPilot-4.7
         k_param_gcs_pid_mask,
         k_param_crash_detection_enable,
         k_param_land_abort_throttle_enable, // unused - moved to AP_Landing
         k_param_rssi = 97,
-        k_param_rpm_sensor,
+        k_param_rpm_sensor_old, // unused - moved to vehicle
         k_param_parachute,
         k_param_arming = 100,
         k_param_parachute_channel, // unused - moved to RC option
@@ -158,14 +163,14 @@ public:
 
         // 110: Telemetry control
         //
-        k_param_gcs0 = 110,         // stream rates for SERIAL0
-        k_param_gcs1,               // stream rates for SERIAL1
-        k_param_sysid_this_mav,
-        k_param_sysid_my_gcs,
+        k_param_gcs0_unused = 110,         // unused in ArduPilot-4.7
+        k_param_gcs1_unused,               // unused in ArduPilot-4.7
+        k_param_sysid_this_mav_old,
+        k_param_sysid_my_gcs_old,
         k_param_serial1_baud_old,   // deprecated
-        k_param_telem_delay,
+        k_param_telem_delay_old,
         k_param_serial0_baud_old,   // deprecated
-        k_param_gcs2,               // stream rates for SERIAL2
+        k_param_gcs2_unused,               // unused in ArduPilot-4.7
         k_param_serial2_baud_old,   // deprecated
         k_param_serial2_protocol,   // deprecated
 
@@ -270,7 +275,7 @@ public:
         k_param_rc_12_old,
         k_param_fs_batt_voltage, // unused - moved to AP_BattMonitor
         k_param_fs_batt_mah,     // unused - moved to AP_BattMonitor
-        k_param_fs_timeout_short,
+        k_param_fs_timeout_short_unused, // unused
         k_param_fs_timeout_long,
         k_param_rc_13_old,
         k_param_rc_14_old,
@@ -294,12 +299,12 @@ public:
         // 210: flight modes
         //
         k_param_flight_mode_channel = 210,
-        k_param_flight_mode1,
-        k_param_flight_mode2,
-        k_param_flight_mode3,
-        k_param_flight_mode4,
-        k_param_flight_mode5,
-        k_param_flight_mode6,
+        k_param_flight_modes0,
+        k_param_flight_modes1,
+        k_param_flight_modes2,
+        k_param_flight_modes3,
+        k_param_flight_modes4,
+        k_param_flight_modes5,
         k_param_initial_mode,
         k_param_land_slope_recalc_shallow_threshold,    // unused - moved to AP_Landing
         k_param_land_slope_recalc_steep_threshold_to_abort, // unused - moved to AP_Landing
@@ -350,9 +355,9 @@ public:
         // 254,255: reserved
 
         k_param_vehicle = 257, // vehicle common block of parameters
-        k_param_gcs4,          // stream rates
-        k_param_gcs5,          // stream rates
-        k_param_gcs6,          // stream rates
+        k_param_gcs4_unused,               // unused in ArduPilot-4.7
+        k_param_gcs5_unused,               // unused in ArduPilot-4.7
+        k_param_gcs6_unused,               // unused in ArduPilot-4.7
         k_param_fence,         // vehicle fence - unused
         k_param_acro_yaw_rate,
         k_param_takeoff_throttle_max_t,
@@ -363,17 +368,12 @@ public:
 
         k_param_pullup = 270,
         k_param_quicktune,
-        k_param_mode_autoland, 
+        k_param_mode_autoland,
+        k_param__gcs,
 
     };
 
     AP_Int16 format_version;
-
-    // Telemetry control
-    //
-    AP_Int16 sysid_this_mav;
-    AP_Int16 sysid_my_gcs;
-    AP_Int8 telem_delay;
 
     AP_Enum<RtlAutoland> rtl_autoland;
 
@@ -400,13 +400,13 @@ public:
     // Fly-by-wire
     //
     AP_Int8 flybywire_elev_reverse;
-    AP_Int8 flybywire_climb_rate;
+    AP_Float flybywire_climb_rate;
 
     // Throttle
     //
     AP_Int8 throttle_suppress_manual;
     AP_Int8 throttle_passthru_stabilize;
-    AP_Int8 throttle_fs_enabled;
+    AP_Enum<ThrFailsafe> throttle_fs_enabled;
     AP_Int16 throttle_fs_value;
     AP_Int8 throttle_nudge;
     AP_Int32 use_reverse_thrust;
@@ -414,19 +414,13 @@ public:
     // Failsafe
     AP_Int8 fs_action_short;
     AP_Int8 fs_action_long;
-    AP_Float fs_timeout_short;
     AP_Float fs_timeout_long;
     AP_Int8 gcs_heartbeat_fs_enabled;
 
     // Flight modes
     //
     AP_Int8 flight_mode_channel;
-    AP_Int8 flight_mode1;
-    AP_Int8 flight_mode2;
-    AP_Int8 flight_mode3;
-    AP_Int8 flight_mode4;
-    AP_Int8 flight_mode5;
-    AP_Int8 flight_mode6;
+    AP_Int8 flight_modes[6];
     AP_Int8 initial_mode;
 
     // Navigational manoeuvring limits
@@ -460,7 +454,7 @@ public:
     AP_Int8 takeoff_tdrag_elevator;
     AP_Float takeoff_tdrag_speed1;
     AP_Float takeoff_rotate_speed;
-    AP_Int8 takeoff_throttle_slewrate;
+    AP_Int16 takeoff_throttle_slewrate;
     AP_Float takeoff_pitch_limit_reduction_sec;
     AP_Int8 level_roll_limit;
 #if AP_TERRAIN_AVAILABLE
@@ -506,9 +500,6 @@ public:
     // control over servo output ranges
     SRV_Channels servo_channels;
 
-    // whether to enforce acceptance of packets only from sysid_my_gcs
-    AP_Int8 sysid_enforce;
-
 #if HAL_SOARING_ENABLED
     // ArduSoar parameters
     SoaringController soaring_controller;
@@ -524,6 +515,8 @@ public:
     AP_Int8 home_reset_threshold;
 
     AP_Int32 flight_options;
+
+    AP_Int16 waypoint_climb_slope_height_min;
 
     AP_Int8 takeoff_throttle_accel_count;
     AP_Int8 takeoff_timeout;
@@ -570,6 +563,8 @@ public:
     AC_PID guidedHeading{5000.0,  0.0,   0.0, 0 ,  10.0,   5.0,  5.0 ,  5.0  , 0.0};
 #endif
 
+    AP_Float guided_timeout;
+
 #if AP_SCRIPTING_ENABLED && AP_FOLLOW_ENABLED
     AP_Follow follow;
 #endif
@@ -590,6 +585,9 @@ public:
 #if AP_RANGEFINDER_ENABLED
     // orientation of rangefinder to use for landing
     AP_Int8 rangefinder_land_orient;
+
+    // distance to the landing point to engage the rangefinder for landing
+    AP_Int16 rangefinder_land_engage_dist_m;
 #endif
 
 #if AP_PLANE_SYSTEMID_ENABLED

@@ -4,9 +4,9 @@
 --    a) waits for the vehicle to be switched to Guided mode (does nothing)
 --    b) accepts pilot roll, pitch, throttle and yaw input
 --    c) manual mode
---        - roll and pitch cause vehicle to fly horizontally in body frame at up to WP_SPEED
+--        - roll and pitch cause vehicle to fly horizontally in body frame at up to WP_SPD
 --        - yaw controls turn rate
---        - throttle controls climb/descent rate at up to PILOT_SPEED_UP/DOWN?  (WP_SPEED_UP, WPNAV_SPEED_DN?)
+--        - throttle controls climb/descent rate at up to PILOT_SPD_UP/DN (WP_SPD_UP, WP_SPD_DN)
 --    d) autonomous mode
 --        - roll is unchanged from manual mode
 --        - yaw is unchanged from manual mode
@@ -221,7 +221,7 @@ function update()
   pitch_speed = math.max(pitch_speed_target, pitch_speed - roll_pitch_speed_chg_max, -roll_pitch_speed_max)
 
   -- convert targets from body to earth frame and send to guided mode velocity controller
-  local yaw_rad = ahrs:get_yaw()
+  local yaw_rad = ahrs:get_yaw_rad()
   yaw_cos = math.cos(yaw_rad)
   yaw_sin = math.sin(yaw_rad)
   local target_vel_ned = Vector3f()

@@ -17,12 +17,12 @@ int8_t RC_Channels_Rover::flight_mode_channel_number() const
 
 void RC_Channel_Rover::mode_switch_changed(modeswitch_pos_t new_pos)
 {
-    if (new_pos < 0 || (uint8_t)new_pos > rover.num_modes) {
+    if (new_pos < 0 || (uint8_t)new_pos >= ARRAY_SIZE(rover.g.modes)) {
         // should not have been called
         return;
     }
 
-    rover.set_mode((Mode::Number)rover.modes[new_pos].get(), ModeReason::RC_COMMAND);
+    rover.set_mode((Mode::Number)rover.g.modes[new_pos].get(), ModeReason::RC_COMMAND);
 }
 
 // init_aux_switch_function - initialize aux functions
@@ -73,12 +73,27 @@ bool RC_Channels_Rover::has_valid_input() const
     if (in_rc_failsafe()) {
         return false;
     }
-    return true;
+    return RC_Channels::has_valid_input();
 }
 
 RC_Channel * RC_Channels_Rover::get_arming_channel(void) const
 {
     return rover.channel_steer;
+}
+
+bool RC_Channels_Rover::has_pilot_input_for_override_clear()
+{
+    if (channel_outside_trim_dz(get_roll_channel())) {  // steering
+        return true;
+    }
+    // throttle may be non-centered (e.g. forward-only), so use movement-since-override-start
+    if (throttle_moved_since_override_start()) {
+        return true;
+    }
+    if (rover.g2.motors.is_omni() && channel_outside_trim_dz(get_lateral_channel())) {
+        return true;
+    }
+    return false;
 }
 
 void RC_Channel_Rover::do_aux_function_change_mode(Mode &mode,
@@ -148,7 +163,7 @@ bool RC_Channel_Rover::do_aux_function(const AuxFuncTrigger &trigger)
             // if disarmed clear mission and set home to current location
             if (!rover.arming.is_armed()) {
                 rover.mode_auto.mission.clear();
-                gcs().send_text(MAV_SEVERITY_NOTICE, "SaveWP: Mission cleared!");
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "SaveWP: Mission cleared!");
                 if (!rover.set_home_to_current_location(false)) {
                     // ignored
                 }
@@ -243,7 +258,7 @@ bool RC_Channel_Rover::do_aux_function(const AuxFuncTrigger &trigger)
             (rover.control_mode != &rover.mode_loiter)
             && (rover.control_mode != &rover.mode_hold) && ch_flag == AuxSwitchPos::HIGH) {
             SRV_Channels::set_trim_to_servo_out_for(SRV_Channel::k_steering);
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "Steering trim saved!");
+            GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "Steering trim saved!");
         }
         break;
 

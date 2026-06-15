@@ -33,7 +33,7 @@ AP_FW_Controller::AP_FW_Controller(const AP_FixedWing &parms, const AC_PID::Defa
 /*
   AC_PID based rate controller
 */
-float AP_FW_Controller::_get_rate_out(float desired_rate, float scaler, bool disable_integrator, float aspeed, bool ground_mode)
+float AP_FW_Controller::_get_rate_out(float desired_rate, float scaler, bool disable_integrator, bool ground_mode)
 {
     const float dt = AP::scheduler().get_loop_period_s();
 
@@ -42,13 +42,13 @@ float AP_FW_Controller::_get_rate_out(float desired_rate, float scaler, bool dis
     const float rate = get_measured_rate();
     const float old_I = rate_pid.get_i();
 
-    const bool underspeed = is_underspeed(aspeed);
+    const bool underspeed = is_underspeed();
     if (underspeed) {
         limit_I = true;
     }
 
-    // the P and I elements are scaled by sq(scaler). To use an
-    // unmodified AC_PID object we scale the inputs and calculate FF separately
+    // the PID elements are scaled by sq(scaler). To use an
+    // unmodified AC_PID object we scale the inputs (target and measurement)
     //
     // note that we run AC_PID in radians so that the normal scaling
     // range for IMAX in AC_PID applies (usually an IMAX value less than 1.0)
@@ -59,10 +59,11 @@ float AP_FW_Controller::_get_rate_out(float desired_rate, float scaler, bool dis
         rate_pid.set_integrator(old_I);
     }
 
-    // FF should be scaled by scaler/eas2tas, but since we have scaled
+    // FF and DFF should be scaled by scaler/eas2tas, but since we have scaled
     // the AC_PID target above by scaler*scaler we need to instead
     // divide by scaler*eas2tas to get the right scaling
-    const float ff = degrees(ff_scale * rate_pid.get_ff() / (scaler * eas2tas));
+    const float ff = degrees(ff_scale * rate_pid.get_ff_component() / (scaler * eas2tas));
+    const float dff = degrees(ff_scale * rate_pid.get_dff_component() / (scaler * eas2tas));
     ff_scale = 1.0;
 
     if (disable_integrator) {
@@ -78,7 +79,7 @@ float AP_FW_Controller::_get_rate_out(float desired_rate, float scaler, bool dis
     pinfo.P *= deg_scale;
     pinfo.I *= deg_scale;
     pinfo.D *= deg_scale;
-    pinfo.DFF *= deg_scale;
+    pinfo.DFF = dff;
 
     // fix the logged target and actual values to not have the scalers applied
     pinfo.target = desired_rate;
@@ -94,7 +95,7 @@ float AP_FW_Controller::_get_rate_out(float desired_rate, float scaler, bool dis
     // remember the last output to trigger the I limit
     _last_out = out;
 
-    if (autotune != nullptr && autotune->running && aspeed > aparm.airspeed_min) {
+    if (autotune != nullptr && autotune->running && get_airspeed() > aparm.airspeed_min) {
         // let autotune have a go at the values
         autotune->update(pinfo, scaler, angle_err_deg);
     }
@@ -108,7 +109,7 @@ float AP_FW_Controller::_get_rate_out(float desired_rate, float scaler, bool dis
 */
 float AP_FW_Controller::get_rate_out(float desired_rate, float scaler)
 {
-    return _get_rate_out(desired_rate, scaler, false, get_airspeed(), false);
+    return _get_rate_out(desired_rate, scaler, false, false);
 }
 
 void AP_FW_Controller::reset_I()
@@ -153,5 +154,15 @@ void AP_FW_Controller::autotune_start(void)
     if (autotune != nullptr) {
         autotune->start();
     }
+}
+
+float AP_FW_Controller::get_airspeed() const
+{
+    float aspeed;
+    if (!AP::ahrs().airspeed_EAS(aspeed)) {
+        // If no airspeed available use average of min and max
+        aspeed = 0.5f*(float(aparm.airspeed_min) + float(aparm.airspeed_max));
+    }
+    return aspeed;
 }
 

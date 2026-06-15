@@ -22,11 +22,16 @@ enum class AC_PolyFenceType : uint8_t {
     END_OF_STORAGE        = 99,
     POLYGON_INCLUSION     = 98,
     POLYGON_EXCLUSION     = 97,
+#if AC_POLYFENCE_CIRCLE_INT_SUPPORT_ENABLED
     CIRCLE_EXCLUSION_INT  = 96,
+#endif  // AC_POLYFENCE_CIRCLE_INT_SUPPORT_ENABLED
     RETURN_POINT          = 95,
+#if AC_POLYFENCE_CIRCLE_INT_SUPPORT_ENABLED
     CIRCLE_INCLUSION_INT  = 94,
+#endif // #if AC_POLYFENCE_CIRCLE_INT_SUPPORT_ENABLED
     CIRCLE_EXCLUSION      = 93,
     CIRCLE_INCLUSION      = 92,
+    HOME_CIRCLE_INCLUSION = 91,
 };
 
 // a FenceItem is just a means of passing data about an item into
@@ -65,6 +70,7 @@ public:
     // methods primarily for MissionItemProtocol_Fence to use:
     // return the total number of points stored
     uint16_t num_stored_items() const { return _eeprom_item_count; }
+    // Read from the persistent storage into an item object
     bool get_item(const uint16_t seq, AC_PolyFenceItem &item) WARN_IF_UNUSED;
 
     ///
@@ -136,13 +142,17 @@ public:
     ///
     /// mavlink
     ///
-    /// handler for polygon fence messages with GCS
-    void handle_msg(class GCS_MAVLINK &link, const mavlink_message_t& msg);
-
     //  breached() - returns true if the vehicle has breached any fence
     bool breached() const WARN_IF_UNUSED;
+    //  returns true if location is outside the boundary also returns the minimum distance to the fence
+    bool breached(const Location& loc, float& distance_outside_fence, Vector2f& fence_direction) const WARN_IF_UNUSED;
     //  breached(Location&) - returns true if location is outside the boundary
-    bool breached(const Location& loc) const WARN_IF_UNUSED;
+    bool breached(const Location& loc) const WARN_IF_UNUSED
+    {
+        float distance_outside_fence;
+        Vector2f breach_direction;
+        return breached(loc, distance_outside_fence, breach_direction);
+    }
 
     // returns true if a polygonal include fence could be returned
     bool inclusion_boundary_available() const WARN_IF_UNUSED {
@@ -317,6 +327,7 @@ private:
     // example.
     Vector2f *_loaded_offsets_from_origin;
     Vector2l *_loaded_points_lla;
+    Location loaded_origin; // origin at the time the boundary was loaded
 
     class ExclusionCircle {
     public:
@@ -331,8 +342,15 @@ private:
     class InclusionCircle {
     public:
         Vector2f pos_cm;    // vector offset from home in cm
-        Vector2l point;       // lat/lng of zone
+        Vector2l point;     // scaled lat/lng of zone; INT32_MAX signifies home-centered
         float radius;
+        bool is_home_centered() const WARN_IF_UNUSED {
+            return point.x == INT32_MAX && point.y == INT32_MAX;
+        }
+        void set_home_centered() {
+            point.x = INT32_MAX;
+            point.y = INT32_MAX;
+        }
     };
     InclusionCircle *_loaded_circle_inclusion_boundary;
 
@@ -352,7 +370,7 @@ private:
     // the result into pos_cm.
     bool scale_latlon_from_origin(const Location &origin,
                                   const Vector2l &point,
-                                  Vector2f &pos_cm) WARN_IF_UNUSED;
+                                  Vector2f &pos_cm) const WARN_IF_UNUSED;
    
     // read_polygon_from_storage - reads vertex_count
     // latitude/longitude points from offset in permanent storage,
@@ -363,27 +381,6 @@ private:
                                    const uint8_t vertex_count,
                                    Vector2f *&next_storage_point,
                                    Vector2l *&next_storage_point_lla) WARN_IF_UNUSED;
-
-#if AC_POLYFENCE_FENCE_POINT_PROTOCOL_SUPPORT
-    /*
-     * FENCE_POINT protocol compatibility
-     */
-    void handle_msg_fetch_fence_point(GCS_MAVLINK &link, const mavlink_message_t& msg);
-    void handle_msg_fence_point(GCS_MAVLINK &link, const mavlink_message_t& msg);
-    // contains_compatible_fence - returns true if the permanent fence
-    // storage contains fences that are compatible with the old
-    // FENCE_POINT protocol.
-    bool contains_compatible_fence() const WARN_IF_UNUSED;
-
-    // get_or_create_include_fence - returns a point to an include
-    // fence to be used for the FENCE_POINT-supplied polygon.  May
-    // format the storage appropriately.
-    FenceIndex *get_or_create_include_fence();
-    // get_or_create_include_fence - returns a point to a return point
-    // to be used for the FENCE_POINT-supplied return point.  May
-    // format the storage appropriately.
-    FenceIndex *get_or_create_return_point();
-#endif
 
     // primitives to write parts of fencepoints out:
     bool write_type_to_storage(uint16_t &offset, AC_PolyFenceType type) WARN_IF_UNUSED;

@@ -12,7 +12,6 @@
 #include <AP_Logger/AP_Logger.h>
 #include <AP_Mission/AP_Mission.h>
 #include <AP_OSD/AP_OSD.h>
-#include <AP_RPM/AP_RPM.h>
 #include <SRV_Channel/SRV_Channel.h>
 #include <AP_Motors/AP_Motors.h>
 #include <AR_Motors/AP_MotorsUGV.h>
@@ -28,6 +27,7 @@
 extern AP_IOMCU iomcu;
 #endif
 #include <AP_Scripting/AP_Scripting.h>
+#include <SITL/SITL.h>
 
 #define SCHED_TASK(func, rate_hz, max_time_micros, prio) SCHED_TASK_CLASS(AP_Vehicle, &vehicle, func, rate_hz, max_time_micros, prio)
 
@@ -74,7 +74,7 @@ const AP_Param::GroupInfo AP_Vehicle::var_info[] = {
     AP_SUBGROUPINFO(generator, "GEN_", 7, AP_Vehicle, AP_Generator),
 #endif
 
-#if HAL_EXTERNAL_AHRS_ENABLED
+#if AP_EXTERNAL_AHRS_ENABLED
     // @Group: EAHRS
     // @Path: ../AP_ExternalAHRS/AP_ExternalAHRS.cpp
     AP_SUBGROUPINFO(externalAHRS, "EAHRS", 8, AP_Vehicle, AP_ExternalAHRS),
@@ -194,6 +194,8 @@ const AP_Param::GroupInfo AP_Vehicle::var_info[] = {
     // @Bitmask{Plane}: 17:QLOITER
     // @Bitmask{Plane}: 18:QACRO
     // @Bitmask{Plane}: 19:QAUTOTUNE
+    // @Bitmask{Plane}: 20:Loiter to QLand
+    // @Bitmask{Plane}: 21:Autoland
     // @Bitmask{Rover}: 0:Manual
     // @Bitmask{Rover}: 1:Acro
     // @Bitmask{Rover}: 2:Steering
@@ -284,6 +286,12 @@ const AP_Param::GroupInfo AP_Vehicle::var_info[] = {
     AP_SUBGROUPINFO(serial_manager, "SERIAL", 31, AP_Vehicle, AP_SerialManager),
 #endif
 
+#if AP_RPM_ENABLED
+    // @Group: RPM
+    // @Path: ../AP_RPM/AP_RPM.cpp
+    AP_SUBGROUPINFO(rpm_sensor, "RPM", 32, AP_Vehicle, AP_RPM),
+#endif
+
     AP_GROUPEND
 };
 
@@ -368,10 +376,6 @@ void AP_Vehicle::setup()
     gcs().setup_console();
 #endif
 
-#if AP_NETWORKING_ENABLED
-    networking.init();
-#endif
-
 #if AP_SCRIPTING_ENABLED
 #if AP_SCRIPTING_SERIALDEVICE_ENABLED
     // must be done now so ports are registered and drivers get set up properly
@@ -380,18 +384,17 @@ void AP_Vehicle::setup()
 #endif
 #endif
 
+#if AP_NETWORKING_ENABLED
+    networking.init();
+#endif
+
 #if AP_SCHEDULER_ENABLED
     // Register scheduler_delay_cb, which will run anytime you have
     // more than 5ms remaining in your call to hal.scheduler->delay
     hal.scheduler->register_delay_callback(scheduler_delay_callback, 5);
 #endif
 
-#if HAL_MSP_ENABLED
-    // call MSP init before init_ardupilot to allow for MSP sensors
-    msp.init();
-#endif
-
-#if HAL_EXTERNAL_AHRS_ENABLED
+#if AP_EXTERNAL_AHRS_ENABLED
     // call externalAHRS init before init_ardupilot to allow for external sensors
     externalAHRS.init();
 #endif
@@ -409,6 +412,11 @@ void AP_Vehicle::setup()
 
 #if HAL_CANMANAGER_ENABLED
     can_mgr.init();
+#endif
+
+#if HAL_MSP_ENABLED
+    // call MSP init before init_ardupilot to allow for MSP sensors
+    msp.init();
 #endif
 
 #if HAL_LOGGING_ENABLED
@@ -505,6 +513,7 @@ void AP_Vehicle::setup()
 
 #if AP_FENCE_ENABLED
     fence.init();
+    fence_init();
 #endif
 
 #if AP_CUSTOMROTATIONS_ENABLED
@@ -519,6 +528,14 @@ void AP_Vehicle::setup()
     for (uint8_t i = 0; i<ESC_TELEM_MAX_ESCS; i++) {
         esc_noise[i].set_cutoff_frequency(2);
     }
+#endif
+
+#if AP_RPM_ENABLED
+    rpm_sensor.init();
+#endif
+
+#if AP_ARMING_ENABLED
+    AP::arming().init();
 #endif
 
     // invalidate count in case an enable parameter changed during
@@ -644,6 +661,9 @@ const AP_Scheduler::Task AP_Vehicle::scheduler_tasks[] = {
 #endif
 #if AP_NETWORKING_ENABLED
     SCHED_TASK_CLASS(AP_Networking, &vehicle.networking,    update,                   10,  50, 238),
+#endif
+#if AP_RPM_ENABLED
+    SCHED_TASK_CLASS(AP_RPM, &vehicle.rpm_sensor, update,                             50, 100, 239),
 #endif
 #if OSD_ENABLED
     SCHED_TASK(publish_osd_info, 1, 10, 240),
@@ -843,10 +863,9 @@ void AP_Vehicle::update_dynamic_notch(AP_InertialSensor::HarmonicNotch &notch)
 #if AP_RPM_ENABLED
         case HarmonicNotchDynamicMode::UpdateRPM: // rpm sensor based tracking
         case HarmonicNotchDynamicMode::UpdateRPM2: {
-            const auto *rpm_sensor = AP::rpm();
             uint8_t sensor = (notch.params.tracking_mode()==HarmonicNotchDynamicMode::UpdateRPM?0:1);
             float rpm;
-            if (rpm_sensor != nullptr && rpm_sensor->get_rpm(sensor, rpm)) {
+            if (rpm_sensor.get_rpm(sensor, rpm)) {
                 // set the harmonic notch filter frequency from the main rotor rpm
                 notch.update_freq_hz(rpm * ref * (1.0/60));
             } else {
@@ -994,8 +1013,8 @@ void AP_Vehicle::publish_osd_info()
 void AP_Vehicle::get_osd_roll_pitch_rad(float &roll, float &pitch) const
 {
 #if AP_AHRS_ENABLED
-    roll = ahrs.get_roll();
-    pitch = ahrs.get_pitch();
+    roll = ahrs.get_roll_rad();
+    pitch = ahrs.get_pitch_rad();
 #else
     roll = 0.0;
     pitch = 0.0;
@@ -1086,6 +1105,18 @@ void AP_Vehicle::one_Hz_update(void)
 #endif
 #endif
 
+#if HAL_GCS_ENABLED
+    // Check if available modes have changed
+    const uint32_t available_mode_enabled_mask = get_available_mode_enabled_mask();
+    if (available_mode_enabled_mask != last_available_mode_enabled_mask) {
+        if (last_available_mode_enabled_mask != 0) {
+            // Last value is only zero at init, track changes after that
+            gcs().available_modes_changed();
+        }
+        last_available_mode_enabled_mask = available_mode_enabled_mask;
+    }
+#endif
+
 }
 
 void AP_Vehicle::check_motor_noise()
@@ -1122,6 +1153,47 @@ void AP_Vehicle::check_motor_noise()
 #endif
 }
 
+#if HAL_WITH_ESC_TELEM && (APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_ArduPlane))
+bool AP_Vehicle::motors_takeoff_check(float rpm_min, float rpm_max)
+{
+    auto motors = AP::motors();
+
+    // Allow takeoff if check is disabled or if no motor class is present
+    if (rpm_min <= 0 || motors == nullptr) {
+        return true;
+    }
+
+    // clear warning timer when disarmed
+    uint32_t now_ms = AP_HAL::millis();
+    if (!motors->armed()) {
+        takeoff_check_state.warning_ms = now_ms;
+        return false;
+    }
+
+    // check ESCs are sending RPM at expected level
+    uint32_t motor_mask = motors->get_motor_mask();
+    const bool telem_active = AP::esc_telem().is_telemetry_active(motor_mask);
+    const bool rpm_adequate = AP::esc_telem().are_motors_running(motor_mask, rpm_min, rpm_max);
+
+    // if RPM is at the expected level clear block
+    if (telem_active && rpm_adequate) {
+        return true;
+    }
+
+    // warn the user every 2 seconds that telemetry is inactive or rpm is inadequate
+    if (now_ms - takeoff_check_state.warning_ms > 2000) {
+        takeoff_check_state.warning_ms = now_ms;
+        const char* prefix_str = "Takeoff blocked:";
+        if (!telem_active) {
+            gcs().send_text(MAV_SEVERITY_CRITICAL, "%s waiting for ESC RPM", prefix_str);
+        } else if (!rpm_adequate) {
+            gcs().send_text(MAV_SEVERITY_CRITICAL, "%s ESC RPM out of range", prefix_str);
+        }
+    }
+    return false;
+}
+#endif  // HAL_WITH_ESC_TELEM && (APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_ArduPlane))
+
 #if AP_DDS_ENABLED
 bool AP_Vehicle::init_dds_client()
 {
@@ -1152,6 +1224,13 @@ bool AP_Vehicle::block_GCS_mode_change(uint8_t mode_num, const uint8_t *mode_lis
     return false;
 }
 #endif
+
+#if AP_FENCE_ENABLED
+void AP_Vehicle::fence_init()
+{
+    hal.scheduler->register_io_process(FUNCTOR_BIND_MEMBER(&AP_Vehicle::fence_checks_async, void));
+}
+#endif  // AP_FENCE_ENABLED
 
 AP_Vehicle *AP_Vehicle::_singleton = nullptr;
 

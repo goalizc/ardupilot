@@ -30,8 +30,8 @@ class AP_GPS_GSOF : public AP_GPS_Backend, public AP_GSOF
 public:
     AP_GPS_GSOF(AP_GPS &_gps, AP_GPS::Params &_params, AP_GPS::GPS_State &_state, AP_HAL::UARTDriver *_port);
 
-    AP_GPS::GPS_Status highest_supported_status(void) override WARN_IF_UNUSED {
-        return AP_GPS::GPS_OK_FIX_3D_RTK_FIXED;
+    AP_GPS_FixType highest_supported_status(void) override WARN_IF_UNUSED {
+        return AP_GPS_FixType::RTK_FIXED;
     }
 
     // Methods
@@ -40,6 +40,9 @@ public:
     const char *name() const override { return "GSOF"; }
 
 private:
+
+    // Configure the GPS device
+    bool configure();
 
     // A subset of the port identifiers in the GSOF protocol that are used for serial.
     // Ethernet, USB, etc are not supported by the GPS driver at this time so they are omitted.

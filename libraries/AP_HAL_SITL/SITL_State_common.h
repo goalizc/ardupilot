@@ -17,10 +17,16 @@
 #include <SITL/SIM_VectorNav.h>
 #include <SITL/SIM_MicroStrain.h>
 #include <SITL/SIM_InertialLabs.h>
+#include <SITL/SIM_SensAItion.h>
 #include <SITL/SIM_AIS.h>
 #include <SITL/SIM_GPS.h>
 
 #include <SITL/SIM_SerialRangeFinder.h>
+
+#include <SITL/SIM_Siyi_ZT30.h>
+#include <SITL/SIM_Topotek.h>
+#include <SITL/SIM_Viewpro.h>
+#include <SITL/SIM_AVT_CM62.h>
 
 #include <SITL/SIM_Frsky_D.h>
 #include <SITL/SIM_CRSF.h>
@@ -29,6 +35,7 @@
 #include <SITL/SIM_PS_LD06.h>
 #include <SITL/SIM_PS_RPLidarA2.h>
 #include <SITL/SIM_PS_RPLidarA1.h>
+#include <SITL/SIM_PS_RPLidarS2.h>
 #include <SITL/SIM_PS_TeraRangerTower.h>
 #include <SITL/SIM_PS_LightWare_SF45B.h>
 
@@ -94,19 +101,19 @@ public:
     SITL::SoloGimbal *gimbal;
 #endif
 
-#if HAL_SIM_ADSB_ENABLED
+#if AP_SIM_ADSB_ENABLED
     // simulated ADSb
     SITL::ADSB *adsb;
-#endif
+#endif  // AP_SIM_ADSB_ENABLED
 
 #if AP_SIM_ADSB_SAGETECH_MXS_ENABLED
     SITL::ADSB_Sagetech_MXS *sagetech_mxs;
 #endif
 
-#if !defined(HAL_BUILD_AP_PERIPH)
+#if AP_SIM_VICON_ENABLED
     // simulated vicon system:
     SITL::Vicon *vicon;
-#endif
+#endif  // AP_SIM_VICON_ENABLED
 
     SITL::SerialRangeFinder *serial_rangefinders[16];
     uint8_t num_serial_rangefinders;
@@ -121,23 +128,30 @@ public:
     SITL::PS_LD06 *ld06;
 #endif  // AP_SIM_PS_LD06_ENABLED
 
-#if HAL_SIM_PS_RPLIDARA2_ENABLED
+#if AP_SIM_PS_RPLIDARA2_ENABLED
     // simulated RPLidarA2:
     SITL::PS_RPLidarA2 *rplidara2;
+#endif
+
+#if AP_SIM_PS_RPLIDARA1_ENABLED
+    // simulated RPLidarA1:
+    SITL::PS_RPLidarA1 *rplidara1;
+#endif
+
+#if AP_SIM_PS_RPLIDARS2_ENABLED
+    // simulated RPLidarS2:
+    SITL::PS_RPLidarS2 *rplidars2;
 #endif
 
     // simulated FETtec OneWire ESCs:
     SITL::FETtecOneWireESC *fetteconewireesc;
 
-    // simulated RPLidarA1:
-    SITL::PS_RPLidarA1 *rplidara1;
-
-#if HAL_SIM_PS_LIGHTWARE_SF45B_ENABLED
+#if AP_SIM_PS_LIGHTWARE_SF45B_ENABLED
     // simulated SF45B proximity sensor:
     SITL::PS_LightWare_SF45B *sf45b;
 #endif
 
-#if HAL_SIM_PS_TERARANGERTOWER_ENABLED
+#if AP_SIM_PS_TERARANGERTOWER_ENABLED
     SITL::PS_TeraRangerTower *terarangertower;
 #endif
 
@@ -157,15 +171,19 @@ public:
 
     // simulated InertialLabs INS
     SITL::InertialLabs *inertiallabs;
-    
-#if HAL_SIM_JSON_MASTER_ENABLED
+
+    // simulated SensAItion system:
+    SITL::SensAItion *sensaition;
+
+#if AP_SIM_JSON_MASTER_ENABLED
     // Ride along instances via JSON SITL backend
     SITL::JSON_Master ride_along;
 #endif
 
-#if HAL_SIM_AIS_ENABLED
+#if AP_SIM_AIS_ENABLED
     // simulated AIS stream
     SITL::AIS *ais;
+    SITL::AIS_Replay *ais_replay;
 #endif
 
     // simulated EFI MegaSquirt device:
