@@ -1,5 +1,23 @@
 #include "AC_ShowManager.h"
 
+#include <sys/stat.h>
+
+#include <AP_Filesystem/AP_Filesystem.h>
+#include <AP_HAL/AP_HAL.h>
+#include <AP_Motors/AP_Motors.h>
+#include <GCS_MAVLink/GCS.h>
+
+extern const AP_HAL::HAL& hal;
+
+#ifndef HAL_BOARD_SHOW_DIRECTORY
+#  if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#    define HAL_BOARD_SHOW_DIRECTORY "./show"
+#  else
+#    define HAL_BOARD_SHOW_DIRECTORY "/SHOW"
+#  endif
+#endif
+#define SHOW_FILE (HAL_BOARD_SHOW_DIRECTORY "/show.bin")
+
 const AP_Param::GroupInfo AC_ShowManager::var_info[] = {
 
     // @Param: CTRL_RATE
@@ -99,4 +117,131 @@ const AP_Param::GroupInfo AC_ShowManager::var_info[] = {
 AC_ShowManager::AC_ShowManager(void)
 {
     AP_Param::setup_object_defaults(this, var_info);
+}
+
+// update - called at 50Hz from the scheduler
+void AC_ShowManager::update()
+{
+    // attempt the initial load once at startup; later loads are
+    // command-triggered via reload()
+    if (!_load_attempted) {
+        _load_attempted = true;
+        load_from_file(false);
+    }
+}
+
+// reload - reload the show file from storage
+bool AC_ShowManager::reload()
+{
+    if (AP::motors() == nullptr || AP::motors()->armed()) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Show: reload refused while armed");
+        return false;
+    }
+    return load_from_file(true);
+}
+
+// clear - clear the loaded show and delete the show file
+bool AC_ShowManager::clear()
+{
+    if (AP::motors() == nullptr || AP::motors()->armed()) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Show: clear refused while armed");
+        return false;
+    }
+    if (AP::FS().unlink(SHOW_FILE) != 0 && errno != ENOENT) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: failed to delete show file");
+        return false;
+    }
+    _parser.reset();
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show cleared");
+    return true;
+}
+
+// load_from_file - read and parse the show file from storage
+bool AC_ShowManager::load_from_file(bool report)
+{
+    // tell the scheduler to expect slow SD card IO
+    EXPECT_DELAY_MS(3000);
+
+    struct stat st;
+    if (AP::FS().stat(SHOW_FILE, &st) != 0) {
+        if (report) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Show file not found");
+        }
+        return true;
+    }
+    if (st.st_size <= 0 || st.st_size > 65536) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: file size %ld unsupported", (long)st.st_size);
+        return false;
+    }
+
+    const int fd = AP::FS().open(SHOW_FILE, O_RDONLY);
+    if (fd == -1) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: failed to open show file");
+        return false;
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(st.st_size);
+    if (buf == nullptr) {
+        AP::FS().close(fd);
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: out of memory loading show");
+        return false;
+    }
+
+    bool ok = false;
+    const int32_t read_len = AP::FS().read(fd, buf, st.st_size);
+    if (read_len == st.st_size) {
+        ok = _parser.parse(buf, st.st_size);
+        if (ok) {
+            // keep the text within the 50 char STATUSTEXT limit
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show loaded: %u keyframes, %u lights, %u segments",
+                          _parser.keyframe_count(), _parser.light_count(),
+                          _parser.segment_count());
+        } else {
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show load failed: %s", failure_string(_parser.failure()));
+        }
+    } else {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: read error loading show file");
+    }
+
+    free(buf);
+    AP::FS().close(fd);
+    return ok;
+}
+
+// failure_string - map a parser failure to a human readable string
+const char *AC_ShowManager::failure_string(ShowFileParser::Failure failure) const
+{
+    switch (failure) {
+    case ShowFileParser::Failure::NONE:
+        return "ok";
+    case ShowFileParser::Failure::INVALID_MAGIC:
+        return "invalid magic";
+    case ShowFileParser::Failure::UNSUPPORTED_VERSION:
+        return "unsupported version";
+    case ShowFileParser::Failure::BAD_CRC:
+        return "bad checksum";
+    case ShowFileParser::Failure::TRUNCATED:
+        return "truncated file";
+    case ShowFileParser::Failure::EXTRA_DATA:
+        return "extra data";
+    case ShowFileParser::Failure::TOO_MANY_KEYFRAMES:
+        return "too many keyframes";
+    case ShowFileParser::Failure::TOO_MANY_LIGHT_EVENTS:
+        return "too many light events";
+    case ShowFileParser::Failure::TOO_MANY_SEGMENTS:
+        return "too many segments";
+    case ShowFileParser::Failure::BAD_KEYFRAME_TIME:
+        return "keyframe time out of order";
+    case ShowFileParser::Failure::POS_OUT_OF_RANGE:
+        return "position out of range";
+    case ShowFileParser::Failure::VEL_OUT_OF_RANGE:
+        return "velocity out of range";
+    case ShowFileParser::Failure::YAW_OUT_OF_RANGE:
+        return "yaw out of range";
+    case ShowFileParser::Failure::BAD_LIGHT_TIME:
+        return "light time out of order";
+    case ShowFileParser::Failure::BAD_SEGMENT:
+        return "bad segment bounds";
+    }
+    return "unknown";
 }

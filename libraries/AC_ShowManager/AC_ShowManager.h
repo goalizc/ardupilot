@@ -2,15 +2,18 @@
 
 #include <AP_Param/AP_Param.h>
 
+#include "ShowFile.h"
+#include "ShowFileParser.h"
+
 /*
   AC_ShowManager - library managing the drone show (choreography flight
   show). Loads the choreography, plays the timeline on a GPS-time base and
   generates position/velocity targets for the guided controller, plus
   synchronised RGB light output.
 
-  P0: skeleton holding the SHOW_ parameter table only. Later phases add
-  choreography loading (P1), time sync and the state machine (P2),
-  trajectory playback (P3) and lights (P4).
+  P1: show file loading from storage (SD card) with a parser-validated
+  in-memory copy of the choreography. Later phases add time sync and the
+  state machine (P2), trajectory playback (P3) and lights (P4).
 */
 class AC_ShowManager {
 public:
@@ -22,7 +25,35 @@ public:
 
     static const struct AP_Param::GroupInfo var_info[];
 
+    // called at 50Hz from the scheduler
+    void update();
+
+    // (re)load the show file from storage; refused while armed.
+    // returns false if the vehicle is armed or the file fails to parse.
+    bool reload();
+    // clear the loaded show and delete the show file; refused while armed
+    bool clear();
+
+    // accessors for the loaded show data
+    bool is_loaded() const { return _parser.loaded(); }
+    ShowFileParser::Failure failure() const { return _parser.failure(); }
+    uint16_t drone_id() const { return _parser.drone_id(); }
+    uint32_t duration_ms() const { return _parser.duration_ms(); }
+    uint16_t keyframe_count() const { return _parser.keyframe_count(); }
+    uint16_t light_count() const { return _parser.light_count(); }
+    uint8_t segment_count() const { return _parser.segment_count(); }
+    const ShowFile::Keyframe *keyframes() const { return _parser.keyframes(); }
+    const ShowFile::LightEvent *lights() const { return _parser.lights(); }
+    const ShowFile::Segment *segments() const { return _parser.segments(); }
+
 private:
+
+    // read + parse the show file from storage; report controls whether a
+    // missing file is reported to the GCS. returns false on parse failure.
+    bool load_from_file(bool report);
+
+    // map a parser failure to a human readable string
+    const char *failure_string(ShowFileParser::Failure failure) const;
 
     // Parameters (SHOW_*)
     AP_Float _ctrl_rate_hz;         // show player control update rate (Hz)
@@ -35,4 +66,8 @@ private:
     AP_Float _orientation_deg;      // CW rotation of show X axis from North (deg), -1 if unset
     AP_Float _max_xy_err_m;         // max horizontal trajectory tracking error (m)
     AP_Float _max_z_err_m;          // max vertical trajectory tracking error (m)
+
+    // loaded show data
+    ShowFileParser _parser;
+    bool _load_attempted;
 };
