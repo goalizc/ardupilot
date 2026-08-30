@@ -740,6 +740,10 @@ public:
     void *mode_flip_ptr;
 #endif
 
+#if MODE_SHOW_ENABLED
+    void *show_manager_ptr;
+#endif
+
 };
 
 extern const AP_Param::Info        var_info[];

@@ -77,6 +77,10 @@
 #include "defines.h"
 #include "config.h"
 
+#if MODE_SHOW_ENABLED
+#include <AC_ShowManager/AC_ShowManager.h>
+#endif
+
 #if FRAME_CONFIG == HELI_FRAME
  #define MOTOR_CLASS AP_MotorsHeli
 #else
@@ -226,6 +230,7 @@ public:
     friend class ModeZigZag;
     friend class ModeAutorotate;
     friend class ModeTurtle;
+    friend class ModeShow;
 
     friend class _AutoTakeoff;
 
@@ -521,6 +526,11 @@ private:
     // Crop Sprayer
 #if HAL_SPRAYER_ENABLED
     AC_Sprayer sprayer;
+#endif
+
+    // Show manager (drone show library)
+#if MODE_SHOW_ENABLED
+    AC_ShowManager show_manager;
 #endif
 
     // Parachute release
@@ -1115,6 +1125,9 @@ private:
 #endif
 #if MODE_TURTLE_ENABLED
     ModeTurtle mode_turtle;
+#endif
+#if MODE_SHOW_ENABLED
+    ModeShow mode_show;
 #endif
 
     // mode.cpp

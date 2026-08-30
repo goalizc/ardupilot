@@ -104,6 +104,8 @@ public:
 
         // Mode number 30 reserved for "offboard" for external/lua control.
 
+        SHOW =         31,  // drone show: play a choreography (trajectory + lights) on a GPS time base
+
         // Mode number 127 reserved for the "drone show mode" in the Skybrush
         // fork at https://github.com/skybrush-io/ardupilot
     };
@@ -1001,6 +1003,31 @@ private:
     AP_Float flip_rate_dps;              // rotational rate during flip
 
     bool input_is_high_magnitude(RC_Channel &input) const;
+};
+
+
+class ModeShow : public Mode {
+
+public:
+
+    // inherit constructor
+    using Mode::Mode;
+
+    Number mode_number() const override { return Number::SHOW; }
+
+    bool init(bool ignore_checks) override;
+    void run() override;
+    void exit() override;
+
+    bool requires_position() const override { return true; }
+    bool allows_arming(AP_Arming::Method method) const override;
+    bool is_autopilot() const override { return true; }
+    bool has_manual_throttle() const override { return false; }
+
+protected:
+
+    const char *name() const override { return "Show"; }
+    const char *name4() const override { return "SHOW"; }
 };
 
 

@@ -154,6 +154,11 @@ Mode *Copter::mode_from_mode_num(const Mode::Number mode)
             return &mode_turtle;
 #endif
 
+#if MODE_SHOW_ENABLED
+        case Mode::Number::SHOW:
+            return &mode_show;
+#endif
+
         default:
             break;
     }
@@ -290,6 +295,9 @@ uint32_t Copter::get_available_mode_enabled_mask() const
 #endif
 #if MODE_TURTLE_ENABLED
         &copter.mode_turtle,
+#endif
+#if MODE_SHOW_ENABLED
+        &copter.mode_show,
 #endif
     };
 

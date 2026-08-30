@@ -227,6 +227,12 @@
 #endif
 
 //////////////////////////////////////////////////////////////////////////////
+// Show - choreography flight show (trajectory + lights on a GPS time base)
+#ifndef MODE_SHOW_ENABLED
+# define MODE_SHOW_ENABLED 1
+#endif
+
+//////////////////////////////////////////////////////////////////////////////
 // Sport - fly vehicle in rate-controlled (earth-frame) mode
 #ifndef MODE_SPORT_ENABLED
 # define MODE_SPORT_ENABLED (CONFIG_HAL_BOARD == HAL_BOARD_SITL)

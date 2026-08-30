@@ -10,6 +10,7 @@ def build(bld):
             'AC_CustomControl',
             'AC_InputManager',
             'AC_PrecLand',
+            'AC_ShowManager',
             'AC_Sprayer',
             'AC_Autorotation',
             'AC_WPNav',

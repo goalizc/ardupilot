@@ -150,7 +150,7 @@ const AP_Param::Info Copter::var_info[] = {
     // @Param: FLTMODE1
     // @DisplayName: Flight Mode 1
     // @Description: Flight mode when pwm of Flightmode channel(FLTMODE_CH) is <= 1230
-    // @Values: 0:Stabilize,1:Acro,2:AltHold,3:Auto,4:Guided,5:Loiter,6:RTL,7:Circle,9:Land,11:Drift,13:Sport,14:Flip,15:AutoTune,16:PosHold,17:Brake,18:Throw,19:Avoid_ADSB,20:Guided_NoGPS,21:Smart_RTL,22:FlowHold,23:Follow,24:ZigZag,25:SystemID,26:Heli_Autorotate,27:Auto RTL,28:Turtle
+    // @Values: 0:Stabilize,1:Acro,2:AltHold,3:Auto,4:Guided,5:Loiter,6:RTL,7:Circle,9:Land,11:Drift,13:Sport,14:Flip,15:AutoTune,16:PosHold,17:Brake,18:Throw,19:Avoid_ADSB,20:Guided_NoGPS,21:Smart_RTL,22:FlowHold,23:Follow,24:ZigZag,25:SystemID,26:Heli_Autorotate,27:Auto RTL,28:Turtle,31:Show
     // @User: Standard
     GARRAY(flight_modes, 0, "FLTMODE1", (uint8_t)FLIGHT_MODE_1),
 
@@ -1002,8 +1002,11 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     // extend to a new group
     AP_SUBGROUPEXTENSION("", 61, ParametersG2, var_info2),
 
-    // ID 62 is reserved for the SHOW_... parameters from the Skybrush fork at
-    // https://github.com/skybrush-io/ardupilot
+#if MODE_SHOW_ENABLED
+    // @Group: SHOW_
+    // @Path: ../libraries/AC_ShowManager/AC_ShowManager.cpp
+    AP_SUBGROUPPTR(show_manager_ptr, "SHOW_", 62, ParametersG2, AC_ShowManager),
+#endif
 
     AP_GROUPEND
 };
@@ -1260,6 +1263,10 @@ ParametersG2::ParametersG2(void) :
 
 #if MODE_FLIP_ENABLED
     ,mode_flip_ptr(&copter.mode_flip)
+#endif
+
+#if MODE_SHOW_ENABLED
+    ,show_manager_ptr(&copter.show_manager)
 #endif
 
 {
