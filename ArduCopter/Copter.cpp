@@ -234,6 +234,9 @@ const AP_Scheduler::Task Copter::scheduler_tasks[] = {
 #if AP_TERRAIN_AVAILABLE
     SCHED_TASK(terrain_update,        10,    100, 144),
 #endif
+#if MODE_SHOW_ENABLED
+    SCHED_TASK_CLASS(AC_ShowManager, &copter.show_manager, update, 50, 100, 147),
+#endif
 #if AP_WINCH_ENABLED
     SCHED_TASK_CLASS(AP_Winch,             &copter.g2.winch,            update,          50,  50, 150),
 #endif

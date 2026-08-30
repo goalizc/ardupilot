@@ -487,6 +487,16 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_packet(const mavlink_command_i
     case MAV_CMD_DO_MOTOR_TEST:
         return handle_MAV_CMD_DO_MOTOR_TEST(packet);
 
+#if MODE_SHOW_ENABLED
+    case MAV_CMD_USER_1: {
+        // param1: 0 = reload the show file from storage, 1 = clear the show
+        if (is_zero(packet.param1)) {
+            return copter.show_manager.reload() ? MAV_RESULT_ACCEPTED : MAV_RESULT_FAILED;
+        }
+        return copter.show_manager.clear() ? MAV_RESULT_ACCEPTED : MAV_RESULT_FAILED;
+    }
+#endif
+
     case MAV_CMD_NAV_TAKEOFF:
     case MAV_CMD_NAV_VTOL_TAKEOFF:
         return handle_MAV_CMD_NAV_TAKEOFF(packet);
