@@ -7150,6 +7150,36 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         error_message = error_message % (vx, vy, vz_up, m.vx, m.vy, -m.vz)
         raise NotAchievedException(error_message)
 
+    def test_show_mode(self):
+        '''Test that SHOW mode (mode number 31) can be entered in flight and holds position'''
+        self.takeoff(10, mode="LOITER")
+        self.progress("Switching to SHOW mode (31)")
+        self.change_mode(31)
+        self.assert_mode_is(31)
+
+        # the P0 SHOW mode must hold position (it delegates to the guided controller)
+        self.context_set_message_rate_hz('LOCAL_POSITION_NED', 10)
+        start = self.get_sim_time()
+        pos = self.mav.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=5)
+        if pos is None:
+            raise NotAchievedException("Did not receive LOCAL_POSITION_NED")
+        last_pos = (pos.x, pos.y)
+        max_delta = 0.0
+        while self.get_sim_time_cached() < start + 10:
+            m = self.mav.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=5)
+            if m is None:
+                raise NotAchievedException("Lost LOCAL_POSITION_NED stream")
+            delta = math.hypot(m.x - last_pos[0], m.y - last_pos[1])
+            max_delta = max(max_delta, delta)
+            last_pos = (m.x, m.y)
+        self.progress("Max horizontal delta while in SHOW mode: %.2f m" % max_delta)
+        if max_delta > 2.0:
+            raise NotAchievedException("Vehicle drifted %.2f m while in SHOW mode" % max_delta)
+
+        # leave SHOW mode and return to launch
+        self.change_mode('RTL')
+        self.wait_disarmed(timeout=200)
+
     def test_position_target_message_mode(self):
         " Ensure that POSITION_TARGET_LOCAL_NED messages are sent in Guided Mode only "
         self.hover()
@@ -16057,6 +16087,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
              self.AutoTune,
              self.AutoTuneYawD,
              self.NoRCOnBootPreArmFailure,
+             self.test_show_mode,
         ])
         return ret
 
