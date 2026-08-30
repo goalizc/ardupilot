@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import shutil
+import struct
 import tempfile
 import time
 
@@ -7179,6 +7180,72 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         # leave SHOW mode and return to launch
         self.change_mode('RTL')
         self.wait_disarmed(timeout=200)
+
+    def _show_crc32(self, data, crc=0):
+        '''CRC-32 matching AP_Math crc_crc32: init 0, no final xor, poly 0xEDB88320'''
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1))
+        return crc
+
+    def _build_show_file(self, corrupt_crc=False, corrupt_time=False):
+        '''Build a v1 show file: 3 keyframes, 2 light events, 1 segment.
+        The crc32 field covers all bytes after the magic, excluding the
+        crc32 field itself (payload[0:16] + payload[20:]).'''
+        payload = bytearray()
+        # header (crc placeholder at 16..20)
+        payload += struct.pack('<BBHIHHB3x', 1, 0, 7, 5000, 3, 2, 1)
+        payload += b'\x00\x00\x00\x00'
+        # segment: name[4] start_ms[4] end_ms[4]
+        payload += b'seg0' + struct.pack('<II', 0, 5000)
+        # keyframes: t_ms[4] pos_x/y/z[12] vel_x/y/z[6] yaw_cd[2]
+        for i in range(3):
+            t = 2500 * i
+            if corrupt_time and i == 2:
+                t = 1000  # out of order
+            payload += struct.pack('<Iiiihhhh', t, 0, 100 * i, -5000, 0, 100, 0, 0)
+        # light events: t_ms[4] index[1] r/g/b[3]
+        payload += struct.pack('<IBBBB', 0, 0, 255, 0, 0)
+        payload += struct.pack('<IBBBB', 2500, 1, 0, 255, 0)
+        crc = self._show_crc32(payload[0:16])
+        crc = self._show_crc32(payload[20:], crc)
+        if corrupt_crc:
+            crc ^= 1
+        payload[16:20] = struct.pack('<I', crc)
+        return b'SHOW' + bytes(payload)
+
+    def test_show_load(self):
+        '''Test that a show file can be loaded, validated and cleared from storage'''
+        show_dir = "./show"
+        show_path = os.path.join(show_dir, "show.bin")
+        os.makedirs(show_dir, exist_ok=True)
+
+        def trigger_reload(want=0, want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED):
+            self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=want, want_result=want_result)
+
+        # 1. valid file -> loads (hook installed before the command so the
+        #    STATUSTEXT from the reload is not missed)
+        with open(show_path, "wb") as f:
+            f.write(self._build_show_file())
+        self.wait_statustext("Show loaded: 3 keyframes, 2 lights, 1 segments",
+                             timeout=10, the_function=lambda: trigger_reload(0))
+
+        # 2. corrupted checksum -> load fails (command reports FAILED)
+        failed = mavutil.mavlink.MAV_RESULT_FAILED
+        with open(show_path, "wb") as f:
+            f.write(self._build_show_file(corrupt_crc=True))
+        self.wait_statustext("Show load failed: bad checksum",
+                             timeout=10, the_function=lambda: trigger_reload(0, want_result=failed))
+
+        # 3. out-of-order keyframe time -> load fails
+        with open(show_path, "wb") as f:
+            f.write(self._build_show_file(corrupt_time=True))
+        self.wait_statustext("Show load failed: keyframe time out of order",
+                             timeout=10, the_function=lambda: trigger_reload(0, want_result=failed))
+
+        # 4. clear -> show cleared
+        self.wait_statustext("Show cleared", timeout=10, the_function=lambda: trigger_reload(1))
 
     def test_position_target_message_mode(self):
         " Ensure that POSITION_TARGET_LOCAL_NED messages are sent in Guided Mode only "
@@ -16088,6 +16155,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
              self.AutoTuneYawD,
              self.NoRCOnBootPreArmFailure,
              self.test_show_mode,
+             self.test_show_load,
         ])
         return ret
 
