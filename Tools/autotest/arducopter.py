@@ -7189,25 +7189,25 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
                 crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1))
         return crc
 
-    def _build_show_file(self, corrupt_crc=False, corrupt_time=False):
+    def _build_show_file(self, corrupt_crc=False, corrupt_time=False, duration_ms=5000):
         '''Build a v1 show file: 3 keyframes, 2 light events, 1 segment.
         The crc32 field covers all bytes after the magic, excluding the
         crc32 field itself (payload[0:16] + payload[20:]).'''
         payload = bytearray()
         # header (crc placeholder at 16..20)
-        payload += struct.pack('<BBHIHHB3x', 1, 0, 7, 5000, 3, 2, 1)
+        payload += struct.pack('<BBHIHHB3x', 1, 0, 7, duration_ms, 3, 2, 1)
         payload += b'\x00\x00\x00\x00'
         # segment: name[4] start_ms[4] end_ms[4]
-        payload += b'seg0' + struct.pack('<II', 0, 5000)
+        payload += b'seg0' + struct.pack('<II', 0, duration_ms)
         # keyframes: t_ms[4] pos_x/y/z[12] vel_x/y/z[6] yaw_cd[2]
         for i in range(3):
-            t = 2500 * i
+            t = duration_ms // 2 * i
             if corrupt_time and i == 2:
                 t = 1000  # out of order
             payload += struct.pack('<Iiiihhhh', t, 0, 100 * i, -5000, 0, 100, 0, 0)
         # light events: t_ms[4] index[1] r/g/b[3]
         payload += struct.pack('<IBBBB', 0, 0, 255, 0, 0)
-        payload += struct.pack('<IBBBB', 2500, 1, 0, 255, 0)
+        payload += struct.pack('<IBBBB', duration_ms // 2, 1, 0, 255, 0)
         crc = self._show_crc32(payload[0:16])
         crc = self._show_crc32(payload[20:], crc)
         if corrupt_crc:
@@ -7225,7 +7225,12 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
             self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=want, want_result=want_result)
 
         # 1. valid file -> loads (hook installed before the command so the
-        #    STATUSTEXT from the reload is not missed)
+        #    STATUSTEXT from the reload is not missed; wait_statustext must
+        #    get the trigger via the_function, otherwise run_cmd's ACK wait
+        #    consumes the statustext before the hook is installed).
+        #    The match string deliberately omits the duration: MAVLink
+        #    STATUSTEXT.text is limited to 50 chars, the firmware message is
+        #    truncated, so only the leading part is asserted.
         with open(show_path, "wb") as f:
             f.write(self._build_show_file())
         self.wait_statustext("Show loaded: 3 keyframes, 2 lights, 1 segments",
@@ -7246,6 +7251,78 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
 
         # 4. clear -> show cleared
         self.wait_statustext("Show cleared", timeout=10, the_function=lambda: trigger_reload(1))
+
+    def test_show_full_flow(self):
+        '''P2: full show flow - wait for GPS start time, takeoff, perform (hover), RTL'''
+        # run at 1x speedup: AP_HAL::millis()/micros64() in SITL follow the
+        # simulated clock, and at the default 100x speedup the GPS 5Hz
+        # updates reach the RTC (and thus SYSTEM_TIME) only every ~20 wall
+        # seconds, so the RTC lags the true GPS time by seconds to minutes.
+        # At 1x the RTC lag is <=0.2s and the ToW-based start time is
+        # reliable. (Also DISARM_DELAY and other millis() based timers would
+        # fire far too early in sim time at high speedup.)
+        self.context_set_speedup(1)
+        show_dir = "./show"
+        show_path = os.path.join(show_dir, "show.bin")
+        os.makedirs(show_dir, exist_ok=True)
+        with open(show_path, "wb") as f:
+            f.write(self._build_show_file(duration_ms=20000))
+
+        def trigger_reload():
+            self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=0,
+                         want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
+        self.wait_statustext("Show loaded: 3 keyframes, 2 lights, 1 segments",
+                             timeout=10, the_function=trigger_reload)
+
+        # wait for GPS so the RTC (and SYSTEM_TIME) carries the GPS epoch
+        self.wait_ready_to_arm()
+
+        # set the start time to the current GPS time-of-week + 15 seconds.
+        # The margin must be comfortably larger than the time the test needs
+        # to arm and enter the mode: if the start lands in the past the
+        # firmware schedules it for the next GPS week (7 days away), and if
+        # it is only ~2s ahead the init/waiting/takeoff stages all fire at
+        # once so the per-stage statustext hooks are installed too late.
+        self.set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_SYSTEM_TIME, 1)
+        tstart = self.get_sim_time()
+        m = None
+        while self.get_sim_time_cached() < tstart + 20:
+            m = self.mav.recv_match(type='SYSTEM_TIME', blocking=True, timeout=1)
+            if m is not None and m.time_unix_usec > 0:
+                break
+        if m is None or m.time_unix_usec == 0:
+            raise NotAchievedException("Did not receive valid SYSTEM_TIME")
+        # constants mirrored from AP_GPS.h (UNIX_OFFSET_MSEC)
+        unix_offset_msec = 17000 * 86400 + 520 * 604800 * 1000 - 18000
+        tow_ms = ((m.time_unix_usec // 1000) - unix_offset_msec) % (604800 * 1000)
+        now_tow = tow_ms // 1000
+        start_tow = (now_tow + 15) % 604800
+        if start_tow < now_tow:
+            raise NotAchievedException("GPS week boundary too close to schedule a start time")
+        self.set_parameters({
+            "SHOW_START_TIME": start_tow,
+            "SHOW_START_MSEC": 0,
+            "SHOW_TAKEOFF_ALT": 5,
+            "SHOW_POST_ACTION": 2,  # RTL
+            # the show waits on the ground for the start time; do not let
+            # ArduPilot auto-disarm the vehicle while it waits
+            "DISARM_DELAY": 0,
+        })
+
+        # arm, enter SHOW mode and ride the whole flow
+        self.arm_vehicle()
+        self.change_mode(31)
+
+        self.wait_statustext("Show stage: waiting", timeout=10)
+        self.wait_statustext("Show stage: takeoff", timeout=30)
+        self.wait_statustext("Show stage: performing", timeout=30)
+        # hover for the 20s show, then the configured post action (RTL)
+        self.wait_statustext("Show stage: rtl", timeout=40)
+        # DISARM_DELAY is 0 (we disabled auto-disarm while waiting on the
+        # ground), so wait for the landing and disarm explicitly
+        self.wait_altitude(0, 1, relative=True, timeout=60)
+        self.delay_sim_time(2, reason="vehicle to settle on the ground")
+        self.disarm_vehicle(force=True)
 
     def test_position_target_message_mode(self):
         " Ensure that POSITION_TARGET_LOCAL_NED messages are sent in Guided Mode only "
@@ -16156,6 +16233,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
              self.NoRCOnBootPreArmFailure,
              self.test_show_mode,
              self.test_show_load,
+             self.test_show_full_flow,
         ])
         return ret
 
