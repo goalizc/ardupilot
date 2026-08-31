@@ -46,6 +46,30 @@ public:
     const ShowFile::LightEvent *lights() const { return _parser.lights(); }
     const ShowFile::Segment *segments() const { return _parser.segments(); }
 
+    // time sync (D6 locked base)
+    // convert a GPS time-of-week start time (ms) to an epoch time (ms);
+    // the start is interpreted in the current GPS week if it is still in
+    // the future, otherwise in the next week. pure function, unit-tested.
+    static uint64_t compute_start_epoch_ms(uint16_t gps_week, uint32_t gps_week_ms, uint32_t start_ms);
+
+    // true when GPS time is usable for time sync
+    bool gps_time_ok() const;
+    // true when SHOW_START_TIME is set and the start reference is valid
+    bool start_time_valid() const;
+    // microseconds since the show start (negative before the show starts)
+    int64_t elapsed_usec() const;
+    // milliseconds until the show starts (0 if already started)
+    uint32_t time_until_start_ms() const;
+    // true once the show clock reached zero
+    bool is_show_started() const;
+    // true when the show clock passed the choreography duration
+    bool is_performance_completed() const;
+
+    // accessors for the show parameters used by the mode
+    float takeoff_alt_m() const { return _takeoff_alt_m; }
+    float takeoff_err_m() const { return _takeoff_err_m; }
+    int8_t post_action() const { return _post_action; }
+
 private:
 
     // read + parse the show file from storage; report controls whether a
@@ -54,6 +78,10 @@ private:
 
     // map a parser failure to a human readable string
     const char *failure_string(ShowFileParser::Failure failure) const;
+
+    // recompute the start reference from the SHOW_START_* parameters;
+    // returns false when it cannot be resolved (e.g. no GPS time)
+    bool update_start_reference();
 
     // Parameters (SHOW_*)
     AP_Float _ctrl_rate_hz;         // show player control update rate (Hz)
@@ -66,8 +94,17 @@ private:
     AP_Float _orientation_deg;      // CW rotation of show X axis from North (deg), -1 if unset
     AP_Float _max_xy_err_m;         // max horizontal trajectory tracking error (m)
     AP_Float _max_z_err_m;          // max vertical trajectory tracking error (m)
+    AP_Float _takeoff_alt_m;        // takeoff altitude for the show (m)
+    AP_Float _takeoff_err_m;        // max horizontal distance from launch point (m)
+    AP_Int8 _post_action;           // action at the end of the show
 
     // loaded show data
     ShowFileParser _parser;
     bool _load_attempted;
+
+    // time sync state
+    int32_t _last_seen_start_time_sec;
+    int32_t _last_seen_start_time_msec;
+    uint64_t _start_epoch_usec;          // show start on the GPS (unix) clock
+    uint64_t _start_internal_usec;       // show start on the internal clock
 };

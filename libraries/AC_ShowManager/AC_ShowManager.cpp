@@ -3,6 +3,7 @@
 #include <sys/stat.h>
 
 #include <AP_Filesystem/AP_Filesystem.h>
+#include <AP_GPS/AP_GPS.h>
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Motors/AP_Motors.h>
 #include <GCS_MAVLink/GCS.h>
@@ -110,6 +111,31 @@ const AP_Param::GroupInfo AC_ShowManager::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("MAX_Z_ERR", 10, AC_ShowManager, _max_z_err_m, 3.0f),
 
+    // @Param: TAKEOFF_ALT
+    // @DisplayName: Show takeoff altitude
+    // @Description: Target altitude above home that the vehicle climbs to when the show starts.
+    // @Range: 1 50
+    // @Increment: 0.5
+    // @Units: m
+    // @User: Standard
+    AP_GROUPINFO("TAKEOFF_ALT", 11, AC_ShowManager, _takeoff_alt_m, 10.0f),
+
+    // @Param: TAKEOFF_ERR
+    // @DisplayName: Show takeoff position error
+    // @Description: Maximum horizontal distance in metres between the vehicle and its launch position that is allowed when starting the takeoff, to prevent takeoff from a wrong position.
+    // @Range: 0 20
+    // @Increment: 0.5
+    // @Units: m
+    // @User: Standard
+    AP_GROUPINFO("TAKEOFF_ERR", 12, AC_ShowManager, _takeoff_err_m, 3.0f),
+
+    // @Param: POST_ACTION
+    // @DisplayName: Show post-show action
+    // @Description: Action taken when the show has finished.
+    // @Values: 0:Loiter,1:Land,2:RTL,3:RTL or Land
+    // @User: Standard
+    AP_GROUPINFO("POST_ACTION", 13, AC_ShowManager, _post_action, 2),
+
     AP_GROUPEND
 };
 
@@ -117,6 +143,107 @@ const AP_Param::GroupInfo AC_ShowManager::var_info[] = {
 AC_ShowManager::AC_ShowManager(void)
 {
     AP_Param::setup_object_defaults(this, var_info);
+
+    _last_seen_start_time_sec = -1;
+    _last_seen_start_time_msec = 0;
+    _start_epoch_usec = 0;
+    _start_internal_usec = 0;
+}
+
+// compute_start_epoch_ms - convert a GPS time-of-week start time to an
+// epoch time in milliseconds, selecting the current GPS week if the start
+// is still in the future, otherwise the next week.
+uint64_t AC_ShowManager::compute_start_epoch_ms(uint16_t gps_week, uint32_t gps_week_ms, uint32_t start_ms)
+{
+    const uint16_t start_week = (gps_week_ms < start_ms) ? gps_week : (uint16_t)(gps_week + 1);
+    return AP::gps().istate_time_to_epoch_ms(start_week, start_ms);
+}
+
+// gps_time_ok - GPS time is usable for time sync
+bool AC_ShowManager::gps_time_ok() const
+{
+    return AP::gps().time_week() > 0;
+}
+
+// start_time_valid - SHOW_START_TIME is set and the start reference is valid
+bool AC_ShowManager::start_time_valid() const
+{
+    return _start_epoch_usec > 0;
+}
+
+// elapsed_usec - microseconds since the show start (negative before start)
+int64_t AC_ShowManager::elapsed_usec() const
+{
+    if (!start_time_valid()) {
+        return INT64_MIN;
+    }
+    uint64_t now;
+    uint64_t reference;
+    if (_sync_mode == 1) {
+        // internal clock fallback
+        now = AP_HAL::micros64();
+        reference = _start_internal_usec;
+    } else {
+        // GPS time (extrapolates through short outages)
+        now = AP::gps().time_epoch_usec();
+        reference = _start_epoch_usec;
+    }
+    if (now >= reference) {
+        return (int64_t)(now - reference);
+    }
+    return -(int64_t)(reference - now);
+}
+
+// time_until_start_ms - milliseconds until the show starts
+uint32_t AC_ShowManager::time_until_start_ms() const
+{
+    const int64_t elapsed = elapsed_usec();
+    if (elapsed >= 0) {
+        return 0;
+    }
+    return (uint32_t)((-elapsed) / 1000);
+}
+
+// is_show_started - the show clock reached zero
+bool AC_ShowManager::is_show_started() const
+{
+    return elapsed_usec() >= 0;
+}
+
+// is_performance_completed - the show clock passed the choreography duration
+bool AC_ShowManager::is_performance_completed() const
+{
+    if (!is_loaded()) {
+        return false;
+    }
+    return elapsed_usec() >= (int64_t)duration_ms() * 1000;
+}
+
+// update_start_reference - recompute the start reference from the
+// SHOW_START_* parameters; returns false when it cannot be resolved
+bool AC_ShowManager::update_start_reference()
+{
+    if (_start_time_gps_sec < 0) {
+        _start_epoch_usec = 0;
+        _start_internal_usec = 0;
+        return false;
+    }
+    if (!gps_time_ok()) {
+        _start_epoch_usec = 0;
+        _start_internal_usec = 0;
+        return false;
+    }
+    const uint32_t start_ms = (uint32_t)_start_time_gps_sec * 1000U + (uint32_t)_start_time_msec;
+    const uint64_t start_epoch_ms = compute_start_epoch_ms(AP::gps().time_week(), AP::gps().time_week_ms(), start_ms);
+    const uint64_t gps_now_usec = AP::gps().time_epoch_usec();
+    _start_epoch_usec = start_epoch_ms * 1000ULL;
+    // anchor the internal clock at the same future instant
+    if (_start_epoch_usec > gps_now_usec) {
+        _start_internal_usec = AP_HAL::micros64() + (_start_epoch_usec - gps_now_usec);
+    } else {
+        _start_internal_usec = AP_HAL::micros64();
+    }
+    return true;
 }
 
 // update - called at 50Hz from the scheduler
@@ -127,6 +254,16 @@ void AC_ShowManager::update()
     if (!_load_attempted) {
         _load_attempted = true;
         load_from_file(false);
+    }
+
+    // detect SHOW_START_* parameter changes and recompute the start reference
+    if (_start_time_gps_sec != _last_seen_start_time_sec ||
+        _start_time_msec != _last_seen_start_time_msec) {
+        _last_seen_start_time_sec = _start_time_gps_sec;
+        _last_seen_start_time_msec = _start_time_msec;
+        if (!update_start_reference()) {
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: start time needs valid GPS time");
+        }
     }
 }
 
