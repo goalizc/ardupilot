@@ -535,6 +535,9 @@ class ModeAuto : public Mode {
 
 public:
     friend class PayloadPlace;  // in case wp_run is accidentally required
+#if MODE_SHOW_ENABLED
+    friend class ModeShow;  // allows the show mode to drive the shared auto takeoff
+#endif
 
     // inherit constructor
     using Mode::Mode;
@@ -1023,11 +1026,58 @@ public:
     bool allows_arming(AP_Arming::Method method) const override;
     bool is_autopilot() const override { return true; }
     bool has_manual_throttle() const override { return false; }
+    // report the takeoff stage so the land detector does not flag the
+    // climb as a flow-of-control internal error
+    bool is_taking_off() const override { return _stage == Stage::TAKEOFF; }
 
 protected:
 
     const char *name() const override { return "Show"; }
     const char *name4() const override { return "SHOW"; }
+
+private:
+
+    // show state machine stages
+    enum class Stage : uint8_t {
+        OFF = 0,
+        INIT,
+        WAIT_FOR_START,
+        TAKEOFF,
+        PERFORMING,
+        LOITER,
+        RTL,
+        LANDING,
+        LANDED,
+        ERROR,
+    };
+
+    void _set_stage(Stage stage);
+    const char *_stage_name() const;
+
+    // stage run functions (dispatched at 400Hz)
+    void _init_run();
+    void _wait_for_start_run();
+    void _takeoff_run();
+    void _performing_run();
+    void _loiter_run();
+    void _rtl_run();
+    void _landing_run();
+    void _landed_run();
+    void _error_run();
+
+    // stage transition helpers
+    void _wait_for_start_start();
+    void _takeoff_start();
+    void _performing_start();
+    void _loiter_start();
+    void _rtl_start();
+    void _landing_start();
+    void _landed_start();
+    void _error_start();
+
+    Stage _stage;
+    bool _performing_initialised;
+    bool _end_mode_initialised;
 };
 
 
