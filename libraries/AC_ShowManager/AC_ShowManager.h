@@ -1,5 +1,6 @@
 #pragma once
 
+#include <AP_Common/Location.h>
 #include <AP_Param/AP_Param.h>
 
 #include "ShowFile.h"
@@ -69,6 +70,23 @@ public:
     float takeoff_alt_m() const { return _takeoff_alt_m; }
     float takeoff_err_m() const { return _takeoff_err_m; }
     int8_t post_action() const { return _post_action; }
+    float ctrl_rate_hz() const { return _ctrl_rate_hz; }
+    float vel_ff_gain() const { return _vel_ff_gain; }
+    float max_xy_err_m() const { return _max_xy_err_m; }
+    float max_z_err_m() const { return _max_z_err_m; }
+
+    // coordinate system (show frame -> global)
+    // rotate a show-frame position (mm) by the configured orientation;
+    // returns the North/East offset in metres. pure function, unit-tested.
+    static void rotate_show_NE_mm(float orientation_deg, int32_t x_mm, int32_t y_mm,
+                                  float &north_m, float &east_m);
+
+    // convert a show keyframe to a global Location (WGS84) using the
+    // configured show origin and orientation
+    bool show_to_global_location(const ShowFile::Keyframe &kf, Location &loc) const;
+
+    // effective show orientation in degrees (unset -1 becomes 0)
+    float orientation_deg_effective() const { return MAX((float)_orientation_deg, 0.0f); }
 
 private:
 
@@ -97,6 +115,7 @@ private:
     AP_Float _takeoff_alt_m;        // takeoff altitude for the show (m)
     AP_Float _takeoff_err_m;        // max horizontal distance from launch point (m)
     AP_Int8 _post_action;           // action at the end of the show
+    AP_Float _vel_ff_gain;          // velocity feedforward gain for the show player
 
     // loaded show data
     ShowFileParser _parser;

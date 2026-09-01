@@ -4,6 +4,7 @@
 
 #include <AP_Filesystem/AP_Filesystem.h>
 #include <AP_GPS/AP_GPS.h>
+#include <AP_Math/AP_Math.h>
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Motors/AP_Motors.h>
 #include <GCS_MAVLink/GCS.h>
@@ -135,6 +136,14 @@ const AP_Param::GroupInfo AC_ShowManager::var_info[] = {
     // @Values: 0:Loiter,1:Land,2:RTL,3:RTL or Land
     // @User: Standard
     AP_GROUPINFO("POST_ACTION", 13, AC_ShowManager, _post_action, 2),
+
+    // @Param: VEL_FF_GAIN
+    // @DisplayName: Show velocity feedforward gain
+    // @Description: Gain applied to the choreography velocity when sending position/velocity targets to the guided controller during the show. 1.0 commands the full choreography velocity, 0 disables velocity feedforward.
+    // @Range: 0 2
+    // @Increment: 0.1
+    // @User: Advanced
+    AP_GROUPINFO("VEL_FF_GAIN", 14, AC_ShowManager, _vel_ff_gain, 1.0f),
 
     AP_GROUPEND
 };
@@ -381,4 +390,43 @@ const char *AC_ShowManager::failure_string(ShowFileParser::Failure failure) cons
         return "bad segment bounds";
     }
     return "unknown";
+}
+
+// rotate_show_NE_mm - rotate a show-frame position by the configured
+// orientation, returning the North/East offset in metres
+void AC_ShowManager::rotate_show_NE_mm(float orientation_deg, int32_t x_mm, int32_t y_mm,
+                                       float &north_m, float &east_m)
+{
+    const float ori_rad = radians(orientation_deg);
+    const float x_m = x_mm * 0.001f;
+    const float y_m = y_mm * 0.001f;
+    // the show frame is NED (x=north, y=east); rotate the vector by the
+    // clockwise orientation of the show X axis
+    north_m = cosf(ori_rad) * x_m - sinf(ori_rad) * y_m;
+    east_m = sinf(ori_rad) * x_m + cosf(ori_rad) * y_m;
+}
+
+// show_to_global_location - convert a show keyframe to a global Location
+// using the configured show origin and orientation
+bool AC_ShowManager::show_to_global_location(const ShowFile::Keyframe &kf, Location &loc) const
+{
+    if (_origin_lat == 0 && _origin_lng == 0) {
+        return false;
+    }
+    float north_m, east_m;
+    rotate_show_NE_mm(orientation_deg_effective(), kf.pos_x_mm, kf.pos_y_mm, north_m, east_m);
+
+    loc.zero();
+    loc.lat = _origin_lat;
+    loc.lng = _origin_lng;
+    const float alt_m = kf.pos_z_mm * 0.001f;   // show altitude is down positive
+    if (_origin_amsl_mm > 0) {
+        // AMSL mode: show altitude above the configured origin AMSL
+        loc.set_alt_m(alt_m + _origin_amsl_mm * 0.001f, Location::AltFrame::ABSOLUTE);
+    } else {
+        // AGL mode: show altitude above home
+        loc.set_alt_m(-alt_m, Location::AltFrame::ABOVE_HOME);
+    }
+    loc.offset(north_m, east_m);
+    return true;
 }
