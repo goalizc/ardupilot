@@ -7190,10 +7190,12 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         return crc
 
     def _build_show_file(self, corrupt_crc=False, corrupt_time=False, duration_ms=5000,
-                         trajectory=None):
+                         trajectory=None, light_events=None):
         '''Build a v1 show file: 3 keyframes, 2 light events, 1 segment.
         trajectory, when given, is a list of (t_ms, x_mm, y_mm, z_mm, vx, vy, vz, yaw_cd)
         tuples overriding the default keyframes (keyframe_count follows it).
+        light_events, when given, is a list of (t_ms, index, r, g, b) tuples
+        overriding the default light events (light_count follows it).
         The crc32 field covers all bytes after the magic, excluding the
         crc32 field itself (payload[0:16] + payload[20:]).'''
         payload = bytearray()
@@ -7203,8 +7205,10 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         if corrupt_time:
             keyframes = list(keyframes)
             keyframes[2] = (1000,) + keyframes[2][1:]  # out of order
+        if light_events is None:
+            light_events = [(0, 0, 255, 0, 0), (duration_ms // 2, 1, 0, 255, 0)]
         # header (crc placeholder at 16..20)
-        payload += struct.pack('<BBHIHHB3x', 1, 0, 7, duration_ms, len(keyframes), 2, 1)
+        payload += struct.pack('<BBHIHHB3x', 1, 0, 7, duration_ms, len(keyframes), len(light_events), 1)
         payload += b'\x00\x00\x00\x00'
         # segment: name[4] start_ms[4] end_ms[4]
         payload += b'seg0' + struct.pack('<II', 0, duration_ms)
@@ -7212,8 +7216,8 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         for kf in keyframes:
             payload += struct.pack('<Iiiihhhh', *kf)
         # light events: t_ms[4] index[1] r/g/b[3]
-        payload += struct.pack('<IBBBB', 0, 0, 255, 0, 0)
-        payload += struct.pack('<IBBBB', duration_ms // 2, 1, 0, 255, 0)
+        for le in light_events:
+            payload += struct.pack('<IBBBB', *le)
         crc = self._show_crc32(payload[0:16])
         crc = self._show_crc32(payload[20:], crc)
         if corrupt_crc:
@@ -7257,6 +7261,73 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
 
         # 4. clear -> show cleared
         self.wait_statustext("Show cleared", timeout=10, the_function=lambda: trigger_reload(1))
+
+    def test_show_light(self):
+        '''P4: the overall-colour light track is played on the show clock
+        and reported via statustext for SITL verification'''
+        self.context_set_speedup(1)
+        show_dir = "./show"
+        show_path = os.path.join(show_dir, "show.bin")
+        os.makedirs(show_dir, exist_ok=True)
+        duration_ms = 12000
+        # overall-colour events (index 0) at 0ms red, 4000ms green,
+        # 8000ms blue; a per-pixel event at 2000ms must not change it
+        light_events = [
+            (0, 0, 255, 0, 0),
+            (2000, 1, 0, 0, 255),
+            (4000, 0, 0, 255, 0),
+            (8000, 0, 0, 0, 255),
+        ]
+        with open(show_path, "wb") as f:
+            f.write(self._build_show_file(duration_ms=duration_ms, light_events=light_events))
+
+        def trigger_reload():
+            self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=0,
+                         want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
+        self.wait_statustext("Show loaded: 3 keyframes, 4 lights, 1 segments",
+                             timeout=10, the_function=trigger_reload)
+
+        self.wait_ready_to_arm()
+        self.set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_SYSTEM_TIME, 1)
+        tstart = self.get_sim_time()
+        m = None
+        while self.get_sim_time_cached() < tstart + 20:
+            m = self.mav.recv_match(type='SYSTEM_TIME', blocking=True, timeout=1)
+            if m is not None and m.time_unix_usec > 0:
+                break
+        if m is None or m.time_unix_usec == 0:
+            raise NotAchievedException("Did not receive valid SYSTEM_TIME")
+        unix_offset_msec = 17000 * 86400 + 520 * 604800 * 1000 - 18000
+        tow_ms = ((m.time_unix_usec // 1000) - unix_offset_msec) % (604800 * 1000)
+        start_tow = (tow_ms // 1000 + 15) % 604800
+        if start_tow < tow_ms // 1000:
+            raise NotAchievedException("GPS week boundary too close to schedule a start time")
+        origin = self.mav.location()
+        self.set_parameters({
+            "SHOW_START_TIME": start_tow,
+            "SHOW_START_MSEC": 0,
+            "SHOW_TAKEOFF_ALT": 5,
+            "SHOW_POST_ACTION": 2,
+            "DISARM_DELAY": 0,
+            "SHOW_ORIGIN_LAT": int(origin.lat * 1e7),
+            "SHOW_ORIGIN_LNG": int(origin.lng * 1e7),
+            "SHOW_ORIGIN_AMSL": 0,
+            "SHOW_ORIENTATION": 0,
+        })
+        self.arm_vehicle()
+        self.change_mode(31)
+        self.wait_statustext("Show stage: performing", timeout=60)
+        # the light track is step-hold: expect red (0ms), then green
+        # (4000ms), then blue (8000ms).  Each wait consumes statustext in
+        # its own loop, and the report is rate-limited to 10Hz so there is
+        # no message competition between the three assertions.
+        self.wait_statustext("Show light: FF0000", timeout=30)
+        self.wait_statustext("Show light: 00FF00", timeout=30)
+        self.wait_statustext("Show light: 0000FF", timeout=30)
+        self.wait_statustext("Show stage: rtl", timeout=40)
+        self.wait_altitude(0, 1, relative=True, timeout=60)
+        self.delay_sim_time(2, reason="vehicle to settle on the ground")
+        self.disarm_vehicle(force=True)
 
     def test_show_full_flow(self):
         '''P2: full show flow - wait for GPS start time, takeoff, perform (hover), RTL'''
@@ -16420,6 +16491,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
              self.test_show_load,
              self.test_show_full_flow,
              self.test_show_trajectory,
+             self.test_show_light,
         ])
         return ret
 
