@@ -7189,22 +7189,28 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
                 crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1))
         return crc
 
-    def _build_show_file(self, corrupt_crc=False, corrupt_time=False, duration_ms=5000):
+    def _build_show_file(self, corrupt_crc=False, corrupt_time=False, duration_ms=5000,
+                         trajectory=None):
         '''Build a v1 show file: 3 keyframes, 2 light events, 1 segment.
+        trajectory, when given, is a list of (t_ms, x_mm, y_mm, z_mm, vx, vy, vz, yaw_cd)
+        tuples overriding the default keyframes (keyframe_count follows it).
         The crc32 field covers all bytes after the magic, excluding the
         crc32 field itself (payload[0:16] + payload[20:]).'''
         payload = bytearray()
+        keyframes = trajectory if trajectory is not None else [
+            (duration_ms // 2 * i, 0, 100 * i, -5000, 0, 100, 0, 0) for i in range(3)
+        ]
+        if corrupt_time:
+            keyframes = list(keyframes)
+            keyframes[2] = (1000,) + keyframes[2][1:]  # out of order
         # header (crc placeholder at 16..20)
-        payload += struct.pack('<BBHIHHB3x', 1, 0, 7, duration_ms, 3, 2, 1)
+        payload += struct.pack('<BBHIHHB3x', 1, 0, 7, duration_ms, len(keyframes), 2, 1)
         payload += b'\x00\x00\x00\x00'
         # segment: name[4] start_ms[4] end_ms[4]
         payload += b'seg0' + struct.pack('<II', 0, duration_ms)
         # keyframes: t_ms[4] pos_x/y/z[12] vel_x/y/z[6] yaw_cd[2]
-        for i in range(3):
-            t = duration_ms // 2 * i
-            if corrupt_time and i == 2:
-                t = 1000  # out of order
-            payload += struct.pack('<Iiiihhhh', t, 0, 100 * i, -5000, 0, 100, 0, 0)
+        for kf in keyframes:
+            payload += struct.pack('<Iiiihhhh', *kf)
         # light events: t_ms[4] index[1] r/g/b[3]
         payload += struct.pack('<IBBBB', 0, 0, 255, 0, 0)
         payload += struct.pack('<IBBBB', duration_ms // 2, 1, 0, 255, 0)
@@ -7299,6 +7305,8 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         start_tow = (now_tow + 15) % 604800
         if start_tow < now_tow:
             raise NotAchievedException("GPS week boundary too close to schedule a start time")
+        # the show coordinate system origin is the current vehicle position
+        origin = self.mav.location()
         self.set_parameters({
             "SHOW_START_TIME": start_tow,
             "SHOW_START_MSEC": 0,
@@ -7307,6 +7315,12 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
             # the show waits on the ground for the start time; do not let
             # ArduPilot auto-disarm the vehicle while it waits
             "DISARM_DELAY": 0,
+            # P3: the performing stage plays the choreography track, which
+            # needs the show coordinate system origin (the takeoff position)
+            "SHOW_ORIGIN_LAT": int(origin.lat * 1e7),
+            "SHOW_ORIGIN_LNG": int(origin.lng * 1e7),
+            "SHOW_ORIGIN_AMSL": 0,
+            "SHOW_ORIENTATION": 0,
         })
 
         # arm, enter SHOW mode and ride the whole flow
@@ -7320,6 +7334,177 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         self.wait_statustext("Show stage: rtl", timeout=40)
         # DISARM_DELAY is 0 (we disabled auto-disarm while waiting on the
         # ground), so wait for the landing and disarm explicitly
+        self.wait_altitude(0, 1, relative=True, timeout=60)
+        self.delay_sim_time(2, reason="vehicle to settle on the ground")
+        self.disarm_vehicle(force=True)
+
+    def _interp_trajectory(self, traj, t_ms):
+        '''linear interpolation of a trajectory list at t_ms, for target comparison'''
+        if t_ms <= traj[0][0]:
+            return traj[0][1:4]
+        if t_ms >= traj[-1][0]:
+            return traj[-1][1:4]
+        for i in range(len(traj) - 1):
+            if traj[i + 1][0] >= t_ms:
+                (t0, x0, y0, z0) = traj[i][:4]
+                (t1, x1, y1, z1) = traj[i + 1][:4]
+                frac = (t_ms - t0) / float(t1 - t0)
+                return (x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac, z0 + (z1 - z0) * frac)
+        raise NotAchievedException("trajectory interpolation failed")
+
+    def _dist_to_polyline(self, traj, x, y):
+        '''minimum distance in metres from (x,y) in the show frame to the trajectory polyline'''
+        best = float('inf')
+        for i in range(len(traj) - 1):
+            (ax, ay) = (traj[i][1] * 0.001, traj[i][2] * 0.001)
+            (bx, by) = (traj[i + 1][1] * 0.001, traj[i + 1][2] * 0.001)
+            dx = bx - ax
+            dy = by - ay
+            length_sq = dx * dx + dy * dy
+            if length_sq == 0:
+                t = 0
+            else:
+                t = ((x - ax) * dx + (y - ay) * dy) / length_sq
+                t = max(0.0, min(1.0, t))
+            px = ax + t * dx
+            py = ay + t * dy
+            best = min(best, math.hypot(x - px, y - py))
+        return best
+
+    def test_show_trajectory(self):
+        '''P3: the show performs a real choreography trajectory with tracking within tolerance,
+        and the drift monitor triggers the error stage when tracking is impossible'''
+        self.context_set_speedup(1)
+        show_dir = "./show"
+        show_path = os.path.join(show_dir, "show.bin")
+        os.makedirs(show_dir, exist_ok=True)
+        # 20s trajectory: hover for the first 5s, then a square with a climb.
+        # Show frame is NED in millimetres (x=north, y=east, z=down).
+        traj = [
+            (0,     0, 0, -5000, 0, 0, 0, 0),
+            (5000,  0, 0, -5000, 0, 0, 0, 0),
+            (10000, 5000, 0, -5000, 1000, 0, 0, 0),
+            (15000, 5000, 5000, -8000, 0, 1000, -600, 9000),
+            (20000, 0, 5000, -8000, -1000, 0, 0, 9000),
+        ]
+        with open(show_path, "wb") as f:
+            f.write(self._build_show_file(duration_ms=20000, trajectory=traj))
+
+        def trigger_reload():
+            self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=0,
+                         want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
+        self.wait_statustext("Show loaded: 5 keyframes, 2 lights, 1 segments",
+                             timeout=10, the_function=trigger_reload)
+
+        self.wait_ready_to_arm()
+        # schedule the start 15s ahead of the current GPS time-of-week
+        self.set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_SYSTEM_TIME, 1)
+        tstart = self.get_sim_time()
+        m = None
+        while self.get_sim_time_cached() < tstart + 20:
+            m = self.mav.recv_match(type='SYSTEM_TIME', blocking=True, timeout=1)
+            if m is not None and m.time_unix_usec > 0:
+                break
+        if m is None or m.time_unix_usec == 0:
+            raise NotAchievedException("Did not receive valid SYSTEM_TIME")
+        unix_offset_msec = 17000 * 86400 + 520 * 604800 * 1000 - 18000
+        tow_ms = ((m.time_unix_usec // 1000) - unix_offset_msec) % (604800 * 1000)
+        start_tow = (tow_ms // 1000 + 15) % 604800
+        if start_tow < tow_ms // 1000:
+            raise NotAchievedException("GPS week boundary too close to schedule a start time")
+        # the show coordinate system origin is the current vehicle position
+        origin = self.mav.location()
+        self.set_parameters({
+            "SHOW_START_TIME": start_tow,
+            "SHOW_START_MSEC": 0,
+            "SHOW_TAKEOFF_ALT": 5,
+            "SHOW_POST_ACTION": 2,
+            "DISARM_DELAY": 0,
+            "SHOW_VEL_FF_GAIN": 1.0,
+            "SHOW_MAX_XY_ERR": 3.0,
+            "SHOW_MAX_Z_ERR": 3.0,
+            "SHOW_ORIGIN_LAT": int(origin.lat * 1e7),
+            "SHOW_ORIGIN_LNG": int(origin.lng * 1e7),
+            "SHOW_ORIGIN_AMSL": 0,
+            "SHOW_ORIENTATION": 0,
+        })
+
+        self.arm_vehicle()
+        self.change_mode(31)
+        self.wait_statustext("Show stage: performing", timeout=60)
+
+        # sample the actual position while performing. The show clock phase
+        # is unknown to the test (takeoff duration varies), so instead of a
+        # per-sample phase comparison we check the distance from each sample
+        # to the trajectory polyline (shape tracking) plus the end position.
+        # sample for 12s: the show lasts 20s and the post action (RTL) fires
+        # at ~14s, after which the vehicle leaves the trajectory, so sampling
+        # must stop before that. The RTL statustext is captured inside the
+        # sampling loop (waiting for it afterwards would miss it: the loop's
+        # recv_match consumes it).
+        self.context_set_message_rate_hz('LOCAL_POSITION_NED', 10)
+        tstart = self.get_sim_time()
+        max_dist = 0.0
+        samples = 0
+        saw_rtl = False
+        while self.get_sim_time_cached() < tstart + 12:
+            m = self.mav.recv_match(type=['LOCAL_POSITION_NED', 'STATUSTEXT'], blocking=True, timeout=5)
+            if m is None:
+                raise NotAchievedException("Lost mavlink stream")
+            if m.get_type() == 'STATUSTEXT':
+                if 'Show stage: rtl' in m.text:
+                    saw_rtl = True
+                continue
+            # LOCAL_POSITION_NED is NED from the EKF origin; with no show
+            # rotation the show frame maps x->north, y->east, z->up
+            dist = self._dist_to_polyline(traj, m.x, m.y)
+            max_dist = max(max_dist, dist)
+            samples += 1
+        self.progress("Trajectory shape tracking: %u samples, max distance to track %.2f m" % (samples, max_dist))
+        if samples < 30:
+            raise NotAchievedException("Too few trajectory samples: %u" % samples)
+        if max_dist > 1.5:
+            raise NotAchievedException("Trajectory tracking distance %.2f m exceeds 1.5 m" % max_dist)
+
+        # by the end of the show the vehicle should be near the last keyframe
+        # (0, 5000, -8000 mm in the show frame -> NED x=0 y=5 z=8)
+        last = self.mav.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=5)
+        end_err = math.hypot(last.x - 0.0, last.y - 5.0)
+        self.progress("End position error: %.2f m" % end_err)
+        if end_err > 2.0:
+            raise NotAchievedException("End position error %.2f m exceeds 2.0 m" % end_err)
+
+        if not saw_rtl:
+            self.wait_statustext("Show stage: rtl", timeout=40)
+        self.wait_altitude(0, 1, relative=True, timeout=60)
+        self.delay_sim_time(2, reason="vehicle to settle on the ground")
+        self.disarm_vehicle(force=True)
+
+        # --- drift monitor: make tracking impossible and expect the error stage ---
+        self.set_parameters({
+            "SHOW_MAX_XY_ERR": 0.05,   # far below any real tracking error
+            "SHOW_ORIGIN_LAT": int(origin.lat * 1e7),
+            "SHOW_ORIGIN_LNG": int(origin.lng * 1e7),
+            "SHOW_ORIGIN_AMSL": 0,
+            "SHOW_ORIENTATION": 0,
+        })
+        self.wait_ready_to_arm()
+        self.set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_SYSTEM_TIME, 1)
+        m = self.mav.recv_match(type='SYSTEM_TIME', blocking=True, timeout=5)
+        tow_ms = ((m.time_unix_usec // 1000) - unix_offset_msec) % (604800 * 1000)
+        start_tow = (tow_ms // 1000 + 15) % 604800
+        self.set_parameters({"SHOW_START_TIME": start_tow})
+        # leave SHOW mode and re-enter it so the mode initialiser runs again
+        # for the second performance (the vehicle is still in mode 31 from
+        # the first run, and re-issuing change_mode(31) would be a no-op)
+        self.change_mode('LOITER')
+        self.arm_vehicle()
+        self.change_mode(31)
+        self.wait_statustext("Show stage: performing", timeout=60)
+        # tracking the trajectory is impossible with a 5cm tolerance, so the
+        # drift monitor must flag it and fall back to landing
+        self.wait_statustext("Show: drift exceeded", timeout=30)
+        self.wait_statustext("Show stage: landing", timeout=30)
         self.wait_altitude(0, 1, relative=True, timeout=60)
         self.delay_sim_time(2, reason="vehicle to settle on the ground")
         self.disarm_vehicle(force=True)
@@ -16234,6 +16419,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
              self.test_show_mode,
              self.test_show_load,
              self.test_show_full_flow,
+             self.test_show_trajectory,
         ])
         return ret
 
