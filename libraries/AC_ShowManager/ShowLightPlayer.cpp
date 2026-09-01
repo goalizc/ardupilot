@@ -8,6 +8,10 @@ void ShowLightPlayer::set_track(const ShowFile::LightEvent *lights, uint16_t cou
 
 bool ShowLightPlayer::evaluate(uint32_t t_ms, uint8_t &r, uint8_t &g, uint8_t &b) const
 {
+    // no track loaded: light off
+    if (_lights == nullptr || _light_count == 0) {
+        return false;
+    }
     // find the latest overall-colour event at or before t_ms.  the events
     // are sorted by time (parser guarantees monotonic t_ms), so scan in
     // order and keep the last matching one.

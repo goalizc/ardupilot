@@ -17,6 +17,9 @@
 */
 class ShowLightPlayer {
 public:
+    // constructor: no track loaded yet
+    ShowLightPlayer(void) : _lights(nullptr), _light_count(0) {}
+
     // load the overall-colour light track; the caller must keep the
     // buffer alive while the player is used (same contract as ShowPlayer)
     void set_track(const ShowFile::LightEvent *lights, uint16_t count);
