@@ -5,6 +5,10 @@
 #include <AP_ExternalControl/AP_ExternalControl_config.h> // TODO why is this needed if Copter.h includes this
 #include <AP_HAL/Semaphores.h>
 
+#if MODE_SHOW_ENABLED
+#include <AC_ShowManager/ShowPlayer.h>
+#endif
+
 #if AP_COPTER_ADVANCED_FAILSAFE_ENABLED
 #include "afs_copter.h"
 #endif
@@ -1028,7 +1032,13 @@ public:
     bool has_manual_throttle() const override { return false; }
     // report the takeoff stage so the land detector does not flag the
     // climb as a flow-of-control internal error
-    bool is_taking_off() const override { return _stage == Stage::TAKEOFF; }
+    bool is_taking_off() const override {
+#if MODE_SHOW_ENABLED
+        return _stage == Stage::TAKEOFF;
+#else
+        return false;
+#endif
+    }
 
 protected:
 
@@ -1075,9 +1085,19 @@ private:
     void _landed_start();
     void _error_start();
 
+    // trajectory playback and drift monitoring
+#if MODE_SHOW_ENABLED
+    void _send_play_target();
+    void _check_drift();
+
     Stage _stage;
     bool _performing_initialised;
     bool _end_mode_initialised;
+    ShowPlayer _player;
+    uint32_t _last_play_ms;
+    uint8_t _drift_counter;
+    int64_t _performance_t0_usec;   // manager elapsed at performing start
+#endif
 };
 
 

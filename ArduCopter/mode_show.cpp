@@ -201,20 +201,37 @@ void ModeShow::_takeoff_run()
     }
 }
 
-// _performing_start - begin the performance (P2: hover placeholder)
+// _performing_start - begin the performance
 void ModeShow::_performing_start()
 {
     _set_stage(Stage::PERFORMING);
     _performing_initialised = false;
+    // the choreography clock starts when the takeoff has completed, so the
+    // first keyframe (t=0) matches the position reached by the takeoff
+    _performance_t0_usec = copter.show_manager.elapsed_usec();
+    // load the choreography track into the player
+    _player.set_track(copter.show_manager.keyframes(), copter.show_manager.keyframe_count());
+    _last_play_ms = 0;
+    _drift_counter = 0;
 }
 
-// _performing_run - hold position while the show clock runs
+// _performing_run - play the choreography trajectory while the show clock runs
 void ModeShow::_performing_run()
 {
     if (!_performing_initialised) {
         _performing_initialised = true;
         copter.mode_guided.init(true);
     }
+
+    // evaluate and command the trajectory at the configured rate
+    const uint32_t now_ms = AP_HAL::millis();
+    const uint32_t ctrl_interval_ms = 1000U / MAX(1U, (uint32_t)copter.show_manager.ctrl_rate_hz());
+    if (now_ms - _last_play_ms >= ctrl_interval_ms) {
+        _last_play_ms = now_ms;
+        _send_play_target();
+        _check_drift();
+    }
+
     copter.mode_guided.run();
 
     if (!copter.motors->armed()) {
@@ -223,7 +240,9 @@ void ModeShow::_performing_run()
         return;
     }
 
-    if (copter.show_manager.is_performance_completed()) {
+    // the show is over once the show clock passed the choreography duration
+    if ((copter.show_manager.elapsed_usec() - _performance_t0_usec) >=
+        (int64_t)copter.show_manager.duration_ms() * 1000) {
         // the show is over; execute the configured post-show action
         switch (copter.show_manager.post_action()) {
         case 0:
@@ -236,6 +255,92 @@ void ModeShow::_performing_run()
             _rtl_start();
             break;
         }
+    }
+}
+
+// _send_play_target - evaluate the choreography and command the guided controller
+void ModeShow::_send_play_target()
+{
+    const int64_t show_elapsed_ms = (copter.show_manager.elapsed_usec() - _performance_t0_usec) / 1000;
+    if (show_elapsed_ms < 0) {
+        return;
+    }
+    ShowFile::Keyframe kf;
+    if (!_player.evaluate((uint32_t)show_elapsed_ms, kf)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: no trajectory data");
+        copter.mode_guided.hold_position();
+        _error_start();
+        return;
+    }
+
+    Location target_loc;
+    if (!copter.show_manager.show_to_global_location(kf, target_loc)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: no show origin set");
+        copter.mode_guided.hold_position();
+        _error_start();
+        return;
+    }
+    Location ekf_origin;
+    if (!copter.ahrs.get_origin(ekf_origin)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: no EKF origin");
+        copter.mode_guided.hold_position();
+        _error_start();
+        return;
+    }
+    // NED vector from the EKF origin to the target; alt frames are resolved
+    // (the target is ABOVE_HOME, the origin is ABSOLUTE)
+    const Vector3f target_ned = ekf_origin.get_distance_NED_alt_frame(target_loc);
+
+    // rotate the choreography velocity into the global frame and scale by
+    // the velocity feedforward gain
+    const float gain = copter.show_manager.vel_ff_gain();
+    const float ori = copter.show_manager.orientation_deg_effective();
+    float vn, ve;
+    AC_ShowManager::rotate_show_NE_mm(ori, kf.vel_x_mms, kf.vel_y_mms, vn, ve);
+    const Vector3f vel_ned(vn * gain * 0.001f, ve * gain * 0.001f, -kf.vel_z_mms * gain * 0.001f);
+
+    const float yaw_rad = radians(ori + kf.yaw_cd * 0.01f);
+
+    if (!copter.mode_guided.set_pos_vel_accel_NED_m(target_ned.topostype(), vel_ned, Vector3f(),
+                                                    true, yaw_rad, false, 0.0f, false)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: failed to send target");
+        copter.mode_guided.hold_position();
+        _error_start();
+    }
+}
+
+// _check_drift - monitor the tracking error against the choreography target
+void ModeShow::_check_drift()
+{
+    Vector3f actual_ned;
+    if (!copter.ahrs.get_relative_position_NED_origin_float(actual_ned)) {
+        return;
+    }
+    const int64_t show_elapsed_ms = (copter.show_manager.elapsed_usec() - _performance_t0_usec) / 1000;
+    if (show_elapsed_ms < 0) {
+        return;
+    }
+    ShowFile::Keyframe kf;
+    if (!_player.evaluate((uint32_t)show_elapsed_ms, kf)) {
+        return;
+    }
+    Location target_loc;
+    Location ekf_origin;
+    if (!copter.show_manager.show_to_global_location(kf, target_loc) || !copter.ahrs.get_origin(ekf_origin)) {
+        return;
+    }
+    // NED vector from the EKF origin to the target; alt frames are resolved
+    // (the target is ABOVE_HOME, the origin is ABSOLUTE)
+    const Vector3f target_ned = ekf_origin.get_distance_NED_alt_frame(target_loc);
+    const float err_xy = Vector2f{actual_ned.x - target_ned.x, actual_ned.y - target_ned.y}.length();
+    const float err_z = fabsf(actual_ned.z - target_ned.z);
+    if (err_xy > copter.show_manager.max_xy_err_m() || err_z > copter.show_manager.max_z_err_m()) {
+        if (++_drift_counter >= 10) {   // one second of continuous exceedance
+            GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "Show: drift exceeded");
+            _error_start();
+        }
+    } else {
+        _drift_counter = 0;
     }
 }
 
@@ -271,6 +376,12 @@ void ModeShow::_rtl_run()
         copter.mode_rtl.init(true);
     }
     copter.mode_rtl.run();
+    if (copter.ap.land_complete) {
+        // the RTL has landed; move on to the landed stage.  Without this
+        // transition the RTL sub-mode keeps running and its landing
+        // detector would disarm the vehicle again on a subsequent re-arm.
+        _landed_start();
+    }
 }
 
 // _landing_start - land in place
