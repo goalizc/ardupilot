@@ -211,8 +211,10 @@ void ModeShow::_performing_start()
     _performance_t0_usec = copter.show_manager.elapsed_usec();
     // load the choreography track into the player
     _player.set_track(copter.show_manager.keyframes(), copter.show_manager.keyframe_count());
+    _light_player.set_track(copter.show_manager.lights(), copter.show_manager.light_count());
     _last_play_ms = 0;
     _drift_counter = 0;
+    _last_light_ms = 0;
 }
 
 // _performing_run - play the choreography trajectory while the show clock runs
@@ -230,6 +232,7 @@ void ModeShow::_performing_run()
         _last_play_ms = now_ms;
         _send_play_target();
         _check_drift();
+        _send_light();
     }
 
     copter.mode_guided.run();
@@ -255,6 +258,27 @@ void ModeShow::_performing_run()
             _rtl_start();
             break;
         }
+    }
+}
+
+// _send_light - evaluate the overall-colour light track and output it
+void ModeShow::_send_light()
+{
+    const int64_t show_elapsed_ms = (copter.show_manager.elapsed_usec() - _performance_t0_usec) / 1000;
+    if (show_elapsed_ms < 0) {
+        return;
+    }
+    uint8_t r, g_col, b;
+    if (!_light_player.evaluate((uint32_t)show_elapsed_ms, r, g_col, b)) {
+        return;     // before the first light event: keep the LEDs as-is
+    }
+    AP_Notify::handle_rgb(r, g_col, b);
+    // rate-limit the GCS report (no more than 10Hz) so it does not flood
+    // the statustext queue and crowd out streaming messages (see B6)
+    const uint32_t now_ms = AP_HAL::millis();
+    if (now_ms - _last_light_ms >= 100U) {
+        _last_light_ms = now_ms;
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show light: %02X%02X%02X", r, g_col, b);
     }
 }
 

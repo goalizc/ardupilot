@@ -7,6 +7,7 @@
 
 #if MODE_SHOW_ENABLED
 #include <AC_ShowManager/ShowPlayer.h>
+#include <AC_ShowManager/ShowLightPlayer.h>
 #endif
 
 #if AP_COPTER_ADVANCED_FAILSAFE_ENABLED
@@ -1090,6 +1091,9 @@ private:
     void _send_play_target();
     void _check_drift();
 
+    // light output
+    void _send_light();
+
     Stage _stage;
     bool _performing_initialised;
     bool _end_mode_initialised;
@@ -1097,6 +1101,8 @@ private:
     uint32_t _last_play_ms;
     uint8_t _drift_counter;
     int64_t _performance_t0_usec;   // manager elapsed at performing start
+    ShowLightPlayer _light_player;
+    uint32_t _last_light_ms;
 #endif
 };
 
