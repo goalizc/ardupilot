@@ -489,11 +489,40 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_packet(const mavlink_command_i
 
 #if MODE_SHOW_ENABLED
     case MAV_CMD_USER_1: {
-        // param1: 0 = reload the show file from storage, 1 = clear the show
-        if (is_zero(packet.param1)) {
+        // param1 selects the show sub-command:
+        //   0 = reload the show file from storage
+        //   1 = clear the show
+        //  10 = START_CONFIG: param2 = start time (GPS ToW seconds, -1 to
+        //       clear), param3 = authorization (0 revoked, 1 granted),
+        //       param4 = countdown hint in ms (display only)
+        //  11 = STATUS_REQUEST: report the show status as a STATUSTEXT
+        const int32_t sub = (int32_t)packet.param1;
+        switch (sub) {
+        case 0:
             return copter.show_manager.reload() ? MAV_RESULT_ACCEPTED : MAV_RESULT_FAILED;
+        case 1:
+            return copter.show_manager.clear() ? MAV_RESULT_ACCEPTED : MAV_RESULT_FAILED;
+        case 10: {
+            const int32_t start_tow = (int32_t)packet.param2;
+            const uint8_t authorization = (uint8_t)packet.param3;
+            // param4 (countdown hint) is display only; the vehicle syncs to start_tow
+            const bool ok = copter.show_manager.handle_start_config(start_tow, authorization);
+            if (!ok) {
+                GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: invalid start config");
+            } else if (authorization == 0) {
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Show: authorization revoked");
+            } else {
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show: start set");
+            }
+            copter.show_manager.send_status();
+            return ok ? MAV_RESULT_ACCEPTED : MAV_RESULT_FAILED;
         }
-        return copter.show_manager.clear() ? MAV_RESULT_ACCEPTED : MAV_RESULT_FAILED;
+        case 11:
+            copter.show_manager.send_status();
+            return MAV_RESULT_ACCEPTED;
+        default:
+            return MAV_RESULT_FAILED;
+        }
     }
 #endif
 
