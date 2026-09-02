@@ -73,6 +73,8 @@ void ModeShow::_set_stage(Stage stage)
     _stage = stage;
     if (_stage != Stage::OFF) {
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show stage: %s", _stage_name());
+        // keep the show manager's stage mirror in sync for status reports
+        copter.show_manager.set_stage((uint8_t)stage);
     }
 }
 
@@ -146,6 +148,13 @@ void ModeShow::_wait_for_start_run()
         // the show started but nobody armed the vehicle in time
         GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Show: not armed in time");
         _landed_start();
+        return;
+    }
+
+    // a revoked authorization cancels the performance once armed (P5)
+    if (copter.motors->armed() && !copter.show_manager.authorized()) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Show: authorization revoked");
+        _error_start();
         return;
     }
 
