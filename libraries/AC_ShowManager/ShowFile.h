@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include <AP_HAL/AP_HAL_Boards.h>
+
 /*
   Drone show choreography file format v1.
 
@@ -18,6 +20,23 @@
   no final XOR, poly 0xEDB88320).
   Coordinates are in the show frame: NED, down positive, millimetres.
 */
+
+// in-memory capacity of one show.  The full choreography is loaded into
+// RAM (see the D10 hardware spec: F722/H743-class boards with >=512KB
+// RAM), so boards with very little RAM get a reduced capacity so that
+// the Copter firmware still links and can run smaller shows.
+#ifndef AC_SHOW_MAX_KEYFRAMES
+#if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS && defined(HAL_MEMORY_TOTAL_KB) && (HAL_MEMORY_TOTAL_KB < 256)
+#define AC_SHOW_MAX_KEYFRAMES 512
+#define AC_SHOW_MAX_LIGHT_EVENTS 256
+#define AC_SHOW_MAX_SEGMENTS 8
+#else
+#define AC_SHOW_MAX_KEYFRAMES 2048
+#define AC_SHOW_MAX_LIGHT_EVENTS 1024
+#define AC_SHOW_MAX_SEGMENTS 16
+#endif
+#endif
+
 namespace ShowFile {
 
     static const uint8_t MAGIC[4] = { 'S', 'H', 'O', 'W' };
@@ -28,9 +47,9 @@ namespace ShowFile {
     static const uint8_t CRC_OFFSET = 20;
 
     // in-memory limits; files exceeding these are rejected at load
-    static const uint16_t MAX_KEYFRAMES = 2048;
-    static const uint16_t MAX_LIGHT_EVENTS = 1024;
-    static const uint8_t MAX_SEGMENTS = 16;
+    static const uint16_t MAX_KEYFRAMES = AC_SHOW_MAX_KEYFRAMES;
+    static const uint16_t MAX_LIGHT_EVENTS = AC_SHOW_MAX_LIGHT_EVENTS;
+    static const uint8_t MAX_SEGMENTS = AC_SHOW_MAX_SEGMENTS;
 
     // per-field range limits
     static const int32_t POS_LIMIT_MM = 10000000;   // 10 km
