@@ -7262,6 +7262,75 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         # 4. clear -> show cleared
         self.wait_statustext("Show cleared", timeout=10, the_function=lambda: trigger_reload(1))
 
+    def test_show_protocol(self):
+        '''P5: the GCS can set the show start time and authorization via
+        MAV_CMD_USER_1 START_CONFIG and read the status back'''
+        self.context_set_speedup(1)
+        show_dir = "./show"
+        show_path = os.path.join(show_dir, "show.bin")
+        os.makedirs(show_dir, exist_ok=True)
+        with open(show_path, "wb") as f:
+            f.write(self._build_show_file(duration_ms=20000))
+
+        def trigger_reload():
+            self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=0,
+                         want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
+        self.wait_statustext("Show loaded: 3 keyframes, 2 lights, 1 segments",
+                             timeout=10, the_function=trigger_reload)
+
+        self.wait_ready_to_arm()
+        self.set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_SYSTEM_TIME, 1)
+        tstart = self.get_sim_time()
+        m = None
+        while self.get_sim_time_cached() < tstart + 20:
+            m = self.mav.recv_match(type='SYSTEM_TIME', blocking=True, timeout=1)
+            if m is not None and m.time_unix_usec > 0:
+                break
+        if m is None or m.time_unix_usec == 0:
+            raise NotAchievedException("Did not receive valid SYSTEM_TIME")
+        unix_offset_msec = 17000 * 86400 + 520 * 604800 * 1000 - 18000
+        tow_ms = ((m.time_unix_usec // 1000) - unix_offset_msec) % (604800 * 1000)
+        now_tow = tow_ms // 1000
+
+        def send_start_config(start_tow, authorization):
+            # MAV_CMD_USER_1 sub-command 10 (START_CONFIG):
+            #   param1=10, param2=start_tow_sec, param3=authorization,
+            #   param4=countdown hint ms (display only)
+            self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=10, p2=start_tow,
+                         p3=authorization, p4=0,
+                         want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
+
+        # 1. set start time + grant authorization; the START_CONFIG handler
+        #    reports the resulting status ("Show status: 7" = loaded + start
+        #    set + authorized).  The wait hook is installed before the command
+        #    runs so the status emitted by the handler is not missed.
+        self.wait_statustext("Show status: 7", timeout=10,
+                             the_function=lambda: send_start_config(now_tow + 60, 1))
+
+        # 2. request the status via sub-command 11
+        self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=11,
+                     want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
+        # flags: loaded(0x01) + start set(0x02) + authorized(0x04) = 0x07
+        self.wait_statustext("Show status: 7", timeout=10)
+
+        # 3. revoke authorization
+        self.wait_statustext("Show status: 3", timeout=10,
+                             the_function=lambda: send_start_config(now_tow + 60, 0))
+
+        # 4. request the status again; the authorized bit must be clear
+        #    (flags = loaded(0x01) + start set(0x02) = 0x03)
+        self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=11,
+                     want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
+        self.wait_statustext("Show status: 3", timeout=10)
+
+        # restore the parameters the test modified so the suite's leak
+        # check passes; add_to_context=False so the context-pop does not
+        # flip them back to the modified values afterwards
+        self.set_parameters({
+            "SHOW_AUTH": 1,
+            "SHOW_START_TIME": -1,
+        }, add_to_context=False)
+
     def test_show_light(self):
         '''P4: the overall-colour light track is played on the show clock
         and reported via statustext for SITL verification'''
@@ -16492,6 +16561,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
              self.test_show_full_flow,
              self.test_show_trajectory,
              self.test_show_light,
+             self.test_show_protocol,
         ])
         return ret
 
