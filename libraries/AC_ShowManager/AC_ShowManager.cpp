@@ -66,7 +66,6 @@ const AP_Param::GroupInfo AC_ShowManager::var_info[] = {
     // @Description: Latitude of the origin of the show coordinate system in 1e-7 degrees, zero if unset.
     // @Range: -900000000 900000000
     // @Increment: 1
-    // @Units: 1e-7 deg
     // @User: Standard
     AP_GROUPINFO("ORIGIN_LAT", 5, AC_ShowManager, _origin_lat, 0),
 
@@ -75,7 +74,6 @@ const AP_Param::GroupInfo AC_ShowManager::var_info[] = {
     // @Description: Longitude of the origin of the show coordinate system in 1e-7 degrees, zero if unset.
     // @Range: -1800000000 1800000000
     // @Increment: 1
-    // @Units: 1e-7 deg
     // @User: Standard
     AP_GROUPINFO("ORIGIN_LNG", 6, AC_ShowManager, _origin_lng, 0),
 
