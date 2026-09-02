@@ -103,6 +103,11 @@ public:
     // report the show status to the GCS as a STATUSTEXT line
     void send_status();
 
+    // current show stage (0=off,1=waiting,2=takeoff,3=performing,4=end);
+    // reported by ModeShow via set_stage
+    uint8_t stage() const { return _stage; }
+    void set_stage(uint8_t stage) { _stage = stage; }
+
 private:
 
     // read + parse the show file from storage; report controls whether a
@@ -115,6 +120,9 @@ private:
     // recompute the start reference from the SHOW_START_* parameters;
     // returns false when it cannot be resolved (e.g. no GPS time)
     bool update_start_reference();
+
+    // current show stage reported by ModeShow
+    uint8_t _stage;
 
     // Parameters (SHOW_*)
     AP_Float _ctrl_rate_hz;         // show player control update rate (Hz)

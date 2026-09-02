@@ -167,6 +167,7 @@ AC_ShowManager::AC_ShowManager(void)
     _last_seen_start_time_msec = 0;
     _start_epoch_usec = 0;
     _start_internal_usec = 0;
+    _stage = 0;
 }
 
 // compute_start_epoch_ms - convert a GPS time-of-week start time to an
