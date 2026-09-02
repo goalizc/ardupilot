@@ -7292,36 +7292,54 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         tow_ms = ((m.time_unix_usec // 1000) - unix_offset_msec) % (604800 * 1000)
         now_tow = tow_ms // 1000
 
-        def send_start_config(start_tow, authorization):
-            # MAV_CMD_USER_1 sub-command 10 (START_CONFIG):
-            #   param1=10, param2=start_tow_sec, param3=authorization,
-            #   param4=countdown hint ms (display only)
-            self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=10, p2=start_tow,
-                         p3=authorization, p4=0,
+        # run a START_CONFIG / STATUS_REQUEST and return the flags byte of
+        # the first DATA16 show-status packet that arrives.  A message
+        # context is pushed first so the DATA16 emitted by the command
+        # handler is captured even if it precedes the COMMAND_ACK.
+        def status_flags_after(sub, p2=0, p3=0):
+            self.context_push()
+            self.context_collect('DATA16')
+            self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=sub, p2=p2, p3=p3,
                          want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
+            c = self.context_get()
+            flags = None
+            tstart = self.get_sim_time()
+            # the DATA16 send is deferred to the 50Hz update()/GCS send
+            # loop, so poll the collection until the status arrives
+            while self.get_sim_time_cached() < tstart + 10:
+                for x in c.collections['DATA16']:
+                    if x.type == 0x5d and x.data[0] == 7:
+                        flags = x.data[1]
+                        break
+                if flags is not None:
+                    break
+                self.delay_sim_time(0.2)
+            self.context_pop()
+            if flags is None:
+                raise NotAchievedException("Did not receive DATA16 status packet")
+            return flags
 
         # 1. set start time + grant authorization; the START_CONFIG handler
-        #    reports the resulting status ("Show status: 7" = loaded + start
-        #    set + authorized).  The wait hook is installed before the command
-        #    runs so the status emitted by the handler is not missed.
-        self.wait_statustext("Show status: 7", timeout=10,
-                             the_function=lambda: send_start_config(now_tow + 60, 1))
+        #    requests a status report, so a DATA16 status packet with
+        #    flags=0x07 (loaded + start set + authorized) arrives
+        flags = status_flags_after(10, p2=now_tow + 60, p3=1)
+        if flags != 0x07:
+            raise NotAchievedException("Expected flags 0x07 after grant, got 0x%02x" % flags)
 
         # 2. request the status via sub-command 11
-        self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=11,
-                     want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
-        # flags: loaded(0x01) + start set(0x02) + authorized(0x04) = 0x07
-        self.wait_statustext("Show status: 7", timeout=10)
+        flags = status_flags_after(11)
+        if flags != 0x07:
+            raise NotAchievedException("Expected flags 0x07 on request, got 0x%02x" % flags)
 
-        # 3. revoke authorization
-        self.wait_statustext("Show status: 3", timeout=10,
-                             the_function=lambda: send_start_config(now_tow + 60, 0))
+        # 3. revoke authorization; the authorized bit must clear
+        flags = status_flags_after(10, p2=now_tow + 60, p3=0)
+        if (flags & 0x04) != 0:
+            raise NotAchievedException("Expected authorized bit clear, got 0x%02x" % flags)
 
-        # 4. request the status again; the authorized bit must be clear
-        #    (flags = loaded(0x01) + start set(0x02) = 0x03)
-        self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=11,
-                     want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
-        self.wait_statustext("Show status: 3", timeout=10)
+        # 4. request the status again; flags = loaded(0x01) + start(0x02) = 0x03
+        flags = status_flags_after(11)
+        if flags != 0x03:
+            raise NotAchievedException("Expected flags 0x03 after revoke, got 0x%02x" % flags)
 
         # 5. with the authorization revoked, arming and entering SHOW mode
         #    must cancel the performance in the waiting stage
