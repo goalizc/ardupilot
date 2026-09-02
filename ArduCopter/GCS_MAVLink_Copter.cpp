@@ -317,6 +317,13 @@ bool GCS_MAVLINK_Copter::try_send_message(enum ap_message id)
         break;
     }
 
+#if MODE_SHOW_ENABLED
+    case MSG_SHOW_STATUS:
+        // send the show status as a structured DATA16 packet (drone-to-GCS)
+        CHECK_PAYLOAD_SIZE(DATA16);
+        copter.show_manager.send_status_data(chan);
+        break;
+#endif
     default:
         return GCS_MAVLINK::try_send_message(id);
     }
@@ -514,11 +521,11 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_packet(const mavlink_command_i
             } else {
                 GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show: start set");
             }
-            copter.show_manager.send_status();
+            copter.show_manager.request_status_send();
             return ok ? MAV_RESULT_ACCEPTED : MAV_RESULT_FAILED;
         }
         case 11:
-            copter.show_manager.send_status();
+            copter.show_manager.request_status_send();
             return MAV_RESULT_ACCEPTED;
         default:
             return MAV_RESULT_FAILED;
