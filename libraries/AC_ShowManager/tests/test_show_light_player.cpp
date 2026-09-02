@@ -10,7 +10,7 @@ const AP_HAL::HAL& hal = AP_HAL::get_HAL();
 TEST(ShowLightPlayer, NoTrackReturnsOff)
 {
     ShowLightPlayer p;
-    uint8_t r, g, b;
+    uint8_t r = 0, g = 0, b = 0;
     EXPECT_FALSE(p.evaluate(0, r, g, b));
 }
 
@@ -19,7 +19,7 @@ TEST(ShowLightPlayer, BeforeFirstEventIsOff)
     ShowLightPlayer p;
     ShowFile::LightEvent ev{1000, 0, 255, 0, 0};
     p.set_track(&ev, 1);
-    uint8_t r, g, b;
+    uint8_t r = 0, g = 0, b = 0;
     EXPECT_FALSE(p.evaluate(0, r, g, b));
     EXPECT_FALSE(p.evaluate(999, r, g, b));
 }
@@ -32,7 +32,7 @@ TEST(ShowLightPlayer, HoldsColorBetweenEvents)
         {5000, 0, 0, 255, 0},
     };
     p.set_track(ev, 2);
-    uint8_t r, g, b;
+    uint8_t r = 0, g = 0, b = 0;
     // at the first event: red
     EXPECT_TRUE(p.evaluate(1000, r, g, b));
     EXPECT_EQ(r, 255); EXPECT_EQ(g, 0); EXPECT_EQ(b, 0);
@@ -56,7 +56,7 @@ TEST(ShowLightPlayer, IgnoresPerPixelEvents)
         {3000, 0, 0, 255, 0},
     };
     p.set_track(ev, 3);
-    uint8_t r, g, b;
+    uint8_t r = 0, g = 0, b = 0;
     EXPECT_TRUE(p.evaluate(1000, r, g, b));
     EXPECT_EQ(r, 255);
     // 2000..2999: the per-pixel event must not change the overall colour
@@ -76,7 +76,7 @@ TEST(ShowLightPlayer, MultipleOverallEvents)
         {300, 0, 255, 255, 255},
     };
     p.set_track(ev, 4);
-    uint8_t r, g, b;
+    uint8_t r = 0, g = 0, b = 0;
     EXPECT_TRUE(p.evaluate(0, r, g, b));
     EXPECT_EQ(r, 255); EXPECT_EQ(g, 0); EXPECT_EQ(b, 0);
     EXPECT_TRUE(p.evaluate(199, r, g, b));
