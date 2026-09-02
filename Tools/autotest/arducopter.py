@@ -7323,12 +7323,59 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
                      want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
         self.wait_statustext("Show status: 3", timeout=10)
 
+        # 5. with the authorization revoked, arming and entering SHOW mode
+        #    must cancel the performance in the waiting stage
+        origin = self.mav.location()
+        self.set_parameters({
+            "SHOW_ORIGIN_LAT": int(origin.lat * 1e7),
+            "SHOW_ORIGIN_LNG": int(origin.lng * 1e7),
+            "SHOW_ORIGIN_AMSL": 0,
+            "SHOW_ORIENTATION": 0,
+            "SHOW_TAKEOFF_ALT": 5,
+            "SHOW_POST_ACTION": 2,
+            "DISARM_DELAY": 0,
+        })
+        self.arm_vehicle()
+        # entering SHOW mode with a revoked authorization cancels the
+        # performance in the waiting stage.  Collect the STATUSTEXTs
+        # emitted around the mode change and check both the revocation
+        # notice and the landing fallback appeared.
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.change_mode(31)
+        tstart = self.get_sim_time()
+        saw_revoked = False
+        saw_landing = False
+        while self.get_sim_time_cached() < tstart + 30:
+            if self.statustext_in_collections("Show: authorization revoked"):
+                saw_revoked = True
+            if self.statustext_in_collections("Show stage: landing"):
+                saw_landing = True
+            if saw_revoked and saw_landing:
+                break
+            self.delay_sim_time(0.5)
+        self.context_pop()
+        if not saw_revoked:
+            raise NotAchievedException("Did not see revocation notice")
+        if not saw_landing:
+            raise NotAchievedException("Did not see landing fallback")
+        self.wait_altitude(0, 1, relative=True, timeout=60)
+        self.delay_sim_time(2, reason="vehicle to settle on the ground")
+        self.disarm_vehicle(force=True)
+
         # restore the parameters the test modified so the suite's leak
         # check passes; add_to_context=False so the context-pop does not
         # flip them back to the modified values afterwards
         self.set_parameters({
             "SHOW_AUTH": 1,
             "SHOW_START_TIME": -1,
+            "SHOW_ORIGIN_LAT": 0,
+            "SHOW_ORIGIN_LNG": 0,
+            "SHOW_ORIGIN_AMSL": 0,
+            "SHOW_ORIENTATION": -1,
+            "SHOW_TAKEOFF_ALT": 10,
+            "SHOW_POST_ACTION": 2,
+            "DISARM_DELAY": 10,
         }, add_to_context=False)
 
     def test_show_light(self):
