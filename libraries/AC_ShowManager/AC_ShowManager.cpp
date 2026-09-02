@@ -8,6 +8,9 @@
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Motors/AP_Motors.h>
 #include <GCS_MAVLink/GCS.h>
+#include <GCS_MAVLink/GCS_MAVLink.h>
+
+#include "ShowProtocol.h"
 
 extern const AP_HAL::HAL& hal;
 
@@ -145,6 +148,13 @@ const AP_Param::GroupInfo AC_ShowManager::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("VEL_FF_GAIN", 14, AC_ShowManager, _vel_ff_gain, 1.0f),
 
+    // @Param: AUTH
+    // @DisplayName: Show authorization level
+    // @Description: Whether the show is authorized to take off. The GCS can override this at runtime via the START_CONFIG command (0=revoked, 1=granted); the parameter is the persistent default.
+    // @Values: 0:Revoked,1:Granted
+    // @User: Advanced
+    AP_GROUPINFO("AUTH", 15, AC_ShowManager, _authorization, 1),
+
     AP_GROUPEND
 };
 
@@ -274,6 +284,57 @@ void AC_ShowManager::update()
             GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: start time needs valid GPS time");
         }
     }
+}
+
+// handle_start_config - apply a START_CONFIG from the GCS
+bool AC_ShowManager::handle_start_config(int32_t start_tow_sec, uint8_t authorization)
+{
+    _authorization.set((int8_t)authorization);
+    if (start_tow_sec < 0) {
+        // clear the start reference
+        _start_time_gps_sec.set(-1);
+        _start_time_msec.set(0);
+        _start_epoch_usec = 0;
+        _start_internal_usec = 0;
+        _last_seen_start_time_sec = -1;
+        _last_seen_start_time_msec = 0;
+        return true;
+    }
+    // clamp to a valid time-of-week
+    if (start_tow_sec >= 604800) {
+        return false;
+    }
+    _start_time_gps_sec.set(start_tow_sec);
+    _start_time_msec.set(0);
+    // keep the parameter-change detector quiet: the reference was set
+    // internally (not via AP_Param), so mark the state as seen
+    _last_seen_start_time_sec = _start_time_gps_sec.get();
+    _last_seen_start_time_msec = 0;
+    // recompute the reference from the internal state
+    if (!update_start_reference()) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Show: start needs GPS time");
+        return false;
+    }
+    return true;
+}
+
+// send_status - report the show status to the GCS as a STATUSTEXT line
+void AC_ShowManager::send_status()
+{
+    uint8_t flags = 0;
+    if (is_loaded()) {
+        flags |= 0x01;
+    }
+    if (start_time_valid()) {
+        flags |= 0x02;
+    }
+    if (authorized()) {
+        flags |= 0x04;
+    }
+    // report as structured text (the DATA16/32/64/96 message family is not
+    // part of the mavlink2 ecosystem, so STATUSTEXT is the reliable channel)
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show status: %u %d %u",
+                  flags, start_tow_sec(), duration_ms());
 }
 
 // reload - reload the show file from storage

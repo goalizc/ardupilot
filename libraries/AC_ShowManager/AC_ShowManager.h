@@ -88,6 +88,21 @@ public:
     // effective show orientation in degrees (unset -1 becomes 0)
     float orientation_deg_effective() const { return MAX((float)_orientation_deg, 0.0f); }
 
+    // custom protocol (P5)
+    // apply a START_CONFIG from the GCS: set/clear the start reference
+    // (internal state only, not persisted via AP_Param) and the
+    // authorization level. returns true if accepted.
+    bool handle_start_config(int32_t start_tow_sec, uint8_t authorization);
+
+    // true when the show is authorized to take off
+    bool authorized() const { return _authorization.get() != 0; }
+
+    // current start time as GPS time-of-week (seconds); -1 when unset
+    int32_t start_tow_sec() const { return _start_time_gps_sec.get(); }
+
+    // report the show status to the GCS as a STATUSTEXT line
+    void send_status();
+
 private:
 
     // read + parse the show file from storage; report controls whether a
@@ -116,6 +131,9 @@ private:
     AP_Float _takeoff_err_m;        // max horizontal distance from launch point (m)
     AP_Int8 _post_action;           // action at the end of the show
     AP_Float _vel_ff_gain;          // velocity feedforward gain for the show player
+
+    // P5 protocol state
+    AP_Int8 _authorization;         // 0=revoked, 1=granted
 
     // loaded show data
     ShowFileParser _parser;
