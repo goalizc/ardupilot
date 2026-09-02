@@ -2,6 +2,7 @@
 
 #include <AP_Common/Location.h>
 #include <AP_Param/AP_Param.h>
+#include <GCS_MAVLink/GCS_MAVLink.h>
 
 #include "ShowFile.h"
 #include "ShowFileParser.h"
@@ -100,8 +101,15 @@ public:
     // current start time as GPS time-of-week (seconds); -1 when unset
     int32_t start_tow_sec() const { return _start_time_gps_sec.get(); }
 
-    // report the show status to the GCS as a STATUSTEXT line
-    void send_status();
+    // send the show status as a structured DATA16 packet (drone-to-GCS)
+    // on the given GCS channel; called from the GCS message scheduler so
+    // the mavlink send happens with the channel lock held correctly
+    void send_status_data(mavlink_channel_t chan);
+
+    // request a status report; the next 50Hz update() pushes
+    // MSG_SHOW_STATUS so the DATA16 send happens from the GCS main send
+    // loop (sending directly from a packet-receive context loses packets)
+    void request_status_send();
 
     // current show stage (0=off,1=waiting,2=takeoff,3=performing,4=end);
     // reported by ModeShow via set_stage
@@ -142,6 +150,12 @@ private:
 
     // P5 protocol state
     AP_Int8 _authorization;         // 0=revoked, 1=granted
+    bool _status_requested;         // a status report was requested; the
+                                    // 50Hz update() pushes MSG_SHOW_STATUS
+                                    // so the DATA16 send always happens from
+                                    // the GCS main send loop (not from the
+                                    // packet-receive context, where direct
+                                    // mavlink sends get lost)
 
     // loaded show data
     ShowFileParser _parser;

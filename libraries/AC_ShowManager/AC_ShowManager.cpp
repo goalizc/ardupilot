@@ -168,6 +168,7 @@ AC_ShowManager::AC_ShowManager(void)
     _start_epoch_usec = 0;
     _start_internal_usec = 0;
     _stage = 0;
+    _status_requested = false;
 }
 
 // compute_start_epoch_ms - convert a GPS time-of-week start time to an
@@ -285,6 +286,14 @@ void AC_ShowManager::update()
             GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: start time needs valid GPS time");
         }
     }
+
+    // a status report was requested from the packet-receive context; push
+    // MSG_SHOW_STATUS now, from the scheduler main loop, so the DATA16
+    // send happens in the GCS update_send context where it is reliable
+    if (_status_requested) {
+        _status_requested = false;
+        gcs().send_message(MSG_SHOW_STATUS);
+    }
 }
 
 // handle_start_config - apply a START_CONFIG from the GCS
@@ -319,8 +328,8 @@ bool AC_ShowManager::handle_start_config(int32_t start_tow_sec, uint8_t authoriz
     return true;
 }
 
-// send_status - report the show status to the GCS as a STATUSTEXT line
-void AC_ShowManager::send_status()
+// send_status_data - report the show status as a DATA16 packet
+void AC_ShowManager::send_status_data(mavlink_channel_t chan)
 {
     uint8_t flags = 0;
     if (is_loaded()) {
@@ -332,10 +341,29 @@ void AC_ShowManager::send_status()
     if (authorized()) {
         flags |= 0x04;
     }
-    // report as structured text (the DATA16/32/64/96 message family is not
-    // part of the mavlink2 ecosystem, so STATUSTEXT is the reliable channel)
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show status: %u %d %u",
-                  flags, start_tow_sec(), duration_ms());
+    // build the STATUS payload (data[0] = STATUS type) and wrap it in a
+    // DATA16 packet (STATUS_LEN=12 fits in the 16-byte payload).  The
+    // DATA message family is fully supported by mavlink2 ground stations
+    // (pymavlink v20); Mission Planner does not render it, so structured
+    // consumers parse the DATA16 stream instead.
+    uint8_t buf[ShowProtocol::STATUS_LEN];
+    const uint8_t n = ShowProtocol::build_status(buf, flags, stage(), start_tow_sec(), duration_ms());
+    mavlink_data16_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = ShowProtocol::DRONE_TO_GCS;
+    m.len = n;
+    memcpy(m.data, buf, n);
+    mavlink_msg_data16_send(chan, m.type, m.len, m.data);
+}
+
+// request_status_send - request a status report
+void AC_ShowManager::request_status_send()
+{
+    // set a flag that the 50Hz update() picks up and pushes through the
+    // GCS message scheduler.  Sending directly from this context (the
+    // packet-receive path) loses the packet, so the actual DATA16 send
+    // always happens from the scheduler main loop.
+    _status_requested = true;
 }
 
 // reload - reload the show file from storage
