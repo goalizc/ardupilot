@@ -418,6 +418,72 @@ void Copter::Log_Write_Rate_Thread_Dt(float dt, float dtAvg, float dtMax, float 
 #endif
 }
 
+struct PACKED log_Show {
+    LOG_PACKET_HEADER;
+    uint64_t time_us;
+    uint64_t gps_epoch_us;  // GPS absolute time (usec since epoch) - common clock across vehicles
+    uint8_t  stage;         // show stage (ModeShow::Stage enum value)
+    int32_t  elapsed_ms;    // show clock, ms since SHOW_START_TIME (negative before start)
+    float    target_n;      // choreography target, NED (m)
+    float    target_e;
+    float    target_d;
+    float    actual_n;      // measured position, NED (m)
+    float    actual_e;
+    float    actual_d;
+    float    err_xy;        // horizontal tracking error (m)
+    float    err_z;         // vertical tracking error (m)
+};
+
+// Write a SHOW periodic telemetry packet (once per control cycle during performance)
+void Copter::Log_Write_Show(uint8_t stage, int32_t elapsed_ms,
+                            const Vector3f &target_ned, const Vector3f &actual_ned,
+                            float err_xy, float err_z)
+{
+    if (!should_log(MASK_LOG_ANY)) {
+        return;
+    }
+    const struct log_Show pkt {
+        LOG_PACKET_HEADER_INIT(LOG_SHOW_MSG),
+        time_us         : AP_HAL::micros64(),
+        gps_epoch_us    : AP::gps().time_epoch_usec(),
+        stage           : stage,
+        elapsed_ms      : elapsed_ms,
+        target_n        : target_ned.x,
+        target_e        : target_ned.y,
+        target_d        : target_ned.z,
+        actual_n        : actual_ned.x,
+        actual_e        : actual_ned.y,
+        actual_d        : actual_ned.z,
+        err_xy          : err_xy,
+        err_z           : err_z
+    };
+    logger.WriteBlock(&pkt, sizeof(pkt));
+}
+
+struct PACKED log_ShowEvent {
+    LOG_PACKET_HEADER;
+    uint64_t time_us;
+    uint64_t gps_epoch_us;  // GPS absolute time (usec since epoch) - common clock across vehicles
+    uint8_t  stage;         // stage entered (ModeShow::Stage enum value)
+    int32_t  elapsed_ms;    // show clock, ms since SHOW_START_TIME (negative before start)
+};
+
+// Write a SHOW stage-transition event packet (one per stage change)
+void Copter::Log_Write_ShowEvent(uint8_t stage, int32_t elapsed_ms)
+{
+    if (!should_log(MASK_LOG_ANY)) {
+        return;
+    }
+    const struct log_ShowEvent pkt {
+        LOG_PACKET_HEADER_INIT(LOG_SHOW_EVENT_MSG),
+        time_us         : AP_HAL::micros64(),
+        gps_epoch_us    : AP::gps().time_epoch_usec(),
+        stage           : stage,
+        elapsed_ms      : elapsed_ms
+    };
+    logger.WriteBlock(&pkt, sizeof(pkt));
+}
+
 // type and unit information can be found in
 // libraries/AP_Logger/Logstructure.h; search for "log_Units" for
 // units and "Format characters" for field type information
@@ -571,6 +637,34 @@ const struct LogStructure Copter::log_structure[] = {
 
     { LOG_RATE_THREAD_DT_MSG, sizeof(log_Rate_Thread_Dt),
       "RTDT", "Qffff", "TimeUS,dt,dtAvg,dtMax,dtMin", "sssss", "F----" , true },
+
+// @LoggerMessage: SHOW
+// @Description: Drone show periodic telemetry during the performance
+// @Field: TimeUS: Time since system startup
+// @Field: GpsEpoch: GPS absolute time in microseconds since epoch (common clock across vehicles)
+// @Field: Stage: Show stage (ModeShow::Stage enum: 0=off,1=init,2=waiting,3=takeoff,4=performing,5=loiter,6=rtl,7=landing,8=landed,9=error)
+// @Field: ElapsedMs: Show clock in milliseconds since the show start (negative before start)
+// @Field: TN: Target north position
+// @Field: TE: Target east position
+// @Field: TD: Target down position
+// @Field: AN: Actual north position
+// @Field: AE: Actual east position
+// @Field: AD: Actual down position
+// @Field: ErrXY: Horizontal tracking error
+// @Field: ErrZ: Vertical tracking error
+
+    { LOG_SHOW_MSG, sizeof(log_Show),
+      "SHOW", "QQBIffffffff", "TimeUS,GpsEpoch,Stage,ElapsedMs,TN,TE,TD,AN,AE,AD,ErrXY,ErrZ", "ss-smmmmmmmm", "F-----------" },
+
+// @LoggerMessage: SHEV
+// @Description: Drone show stage transition event
+// @Field: TimeUS: Time since system startup
+// @Field: GpsEpoch: GPS absolute time in microseconds since epoch (common clock across vehicles)
+// @Field: Stage: Show stage entered (ModeShow::Stage enum: 0=off,1=init,2=waiting,3=takeoff,4=performing,5=loiter,6=rtl,7=landing,8=landed,9=error)
+// @Field: ElapsedMs: Show clock in milliseconds since the show start (negative before start)
+
+    { LOG_SHOW_EVENT_MSG, sizeof(log_ShowEvent),
+      "SHEV", "QQBI", "TimeUS,GpsEpoch,Stage,ElapsedMs", "ss-s", "F---" },
 
 };
 

@@ -1090,6 +1090,7 @@ private:
 #if MODE_SHOW_ENABLED
     void _send_play_target();
     void _check_drift();
+    void _log_show_periodic();
 
     // light output
     void _send_light();

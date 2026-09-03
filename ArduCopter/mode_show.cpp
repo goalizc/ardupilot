@@ -75,6 +75,14 @@ void ModeShow::_set_stage(Stage stage)
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show stage: %s", _stage_name());
         // keep the show manager's stage mirror in sync for status reports
         copter.show_manager.set_stage((uint8_t)stage);
+        // record the transition with the GPS absolute time so that a
+        // ground station can compare stage timing across vehicles
+#if HAL_LOGGING_ENABLED
+        int64_t elapsed_ms = copter.show_manager.elapsed_usec() / 1000;
+        elapsed_ms = MAX(elapsed_ms, (int64_t)INT32_MIN);
+        elapsed_ms = MIN(elapsed_ms, (int64_t)INT32_MAX);
+        copter.Log_Write_ShowEvent((uint8_t)_stage, (int32_t)elapsed_ms);
+#endif
     }
 }
 
@@ -241,6 +249,9 @@ void ModeShow::_performing_run()
         _last_play_ms = now_ms;
         _send_play_target();
         _check_drift();
+#if HAL_LOGGING_ENABLED
+        _log_show_periodic();
+#endif
         _send_light();
     }
 
@@ -376,6 +387,37 @@ void ModeShow::_check_drift()
         _drift_counter = 0;
     }
 }
+
+#if HAL_LOGGING_ENABLED
+// _log_show_periodic - record one SHOW telemetry line at the control rate.
+// The message carries the GPS absolute time so that a ground station can
+// align logs from different vehicles on a common clock.
+void ModeShow::_log_show_periodic()
+{
+    Vector3f actual_ned;
+    if (!copter.ahrs.get_relative_position_NED_origin_float(actual_ned)) {
+        return;
+    }
+    const int64_t show_elapsed_ms = (copter.show_manager.elapsed_usec() - _performance_t0_usec) / 1000;
+    if (show_elapsed_ms < 0) {
+        return;
+    }
+    ShowFile::Keyframe kf;
+    if (!_player.evaluate((uint32_t)show_elapsed_ms, kf)) {
+        return;
+    }
+    Location target_loc;
+    Location ekf_origin;
+    if (!copter.show_manager.show_to_global_location(kf, target_loc) || !copter.ahrs.get_origin(ekf_origin)) {
+        return;
+    }
+    const Vector3f target_ned = ekf_origin.get_distance_NED_alt_frame(target_loc);
+    const float err_xy = Vector2f{actual_ned.x - target_ned.x, actual_ned.y - target_ned.y}.length();
+    const float err_z = fabsf(actual_ned.z - target_ned.z);
+    copter.Log_Write_Show(copter.show_manager.stage(), (int32_t)show_elapsed_ms,
+                          target_ned, actual_ned, err_xy, err_z);
+}
+#endif  // HAL_LOGGING_ENABLED
 
 // _loiter_start - hold position
 void ModeShow::_loiter_start()
