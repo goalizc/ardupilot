@@ -6,16 +6,20 @@
 
 #include "ShowFile.h"
 #include "ShowFileParser.h"
+#include "ShowStreamReader.h"
+#include "ShowFileSource.h"
 
 /*
   AC_ShowManager - library managing the drone show (choreography flight
-  show). Loads the choreography, plays the timeline on a GPS-time base and
-  generates position/velocity targets for the guided controller, plus
-  synchronised RGB light output.
+  show). Verifies the choreography file (CRC) before flight and streams
+  it from storage through a sliding window during the performance on a
+  GPS-time base, generating position/velocity targets for the guided
+  controller plus synchronised RGB light output.
 
-  P1: show file loading from storage (SD card) with a parser-validated
-  in-memory copy of the choreography. Later phases add time sync and the
-  state machine (P2), trajectory playback (P3) and lights (P4).
+  P1..P5 added show file loading, time sync, the state machine,
+  trajectory playback, lights and the GCS protocol; streaming playback
+  of the v2 event-stream format was introduced later so shows of any
+  length fit on low-RAM boards.
 */
 class AC_ShowManager {
 public:
@@ -31,22 +35,38 @@ public:
     void update();
 
     // (re)load the show file from storage; refused while armed.
-    // returns false if the vehicle is armed or the file fails to parse.
+    // returns false if the vehicle is armed or the file fails to verify.
     bool reload();
     // clear the loaded show and delete the show file; refused while armed
     bool clear();
 
-    // accessors for the loaded show data
-    bool is_loaded() const { return _parser.loaded(); }
-    ShowFileParser::Failure failure() const { return _parser.failure(); }
-    uint16_t drone_id() const { return _parser.drone_id(); }
-    uint32_t duration_ms() const { return _parser.duration_ms(); }
-    uint16_t keyframe_count() const { return _parser.keyframe_count(); }
-    uint16_t light_count() const { return _parser.light_count(); }
-    uint8_t segment_count() const { return _parser.segment_count(); }
-    const ShowFile::Keyframe *keyframes() const { return _parser.keyframes(); }
-    const ShowFile::LightEvent *lights() const { return _parser.lights(); }
-    const ShowFile::Segment *segments() const { return _parser.segments(); }
+    // accessors for the loaded show metadata
+    bool is_loaded() const { return _reader.loaded(); }
+    ShowFileParser::Failure failure() const { return _reader.failure(); }
+    uint16_t drone_id() const { return _reader.drone_id(); }
+    uint32_t duration_ms() const { return _reader.duration_ms(); }
+    uint32_t keyframe_count() const { return _reader.keyframe_count(); }
+    uint32_t light_count() const { return _reader.light_count(); }
+    uint8_t segment_count() const { return _reader.segment_count(); }
+
+    // streaming playback interface (driven by ModeShow)
+    // start streaming from the start of the (verified) file
+    bool start_streaming();
+    // control-rate: advance the window for the show clock t_ms
+    void stream_update(uint32_t t_ms);
+    // true while a position frame at t_ms is available
+    bool stream_can_evaluate(uint32_t t_ms) const { return _reader.can_evaluate(t_ms); }
+    // playing position window (anchor + frames); false when none
+    bool stream_position_view(const ShowFile::Keyframe *&frames, uint16_t &count) const {
+        return _reader.position_view(frames, count);
+    }
+    // playing light window; false when none
+    bool stream_light_view(const ShowFile::LightEvent *&frames, uint16_t &count) const {
+        return _reader.light_view(frames, count);
+    }
+    bool stream_started() const { return _reader.started(); }
+    bool stream_ready_to_play() const { return _reader.ready_to_play(); }
+    void stream_close() { _reader.close(); }
 
     // time sync (D6 locked base)
     // convert a GPS time-of-week start time (ms) to an epoch time (ms);
@@ -157,8 +177,9 @@ private:
                                     // packet-receive context, where direct
                                     // mavlink sends get lost)
 
-    // loaded show data
-    ShowFileParser _parser;
+    // streaming reader for the (verified) show file
+    ShowStreamReader _reader;
+    ShowFileSource _source;
     bool _load_attempted;
 
     // time sync state

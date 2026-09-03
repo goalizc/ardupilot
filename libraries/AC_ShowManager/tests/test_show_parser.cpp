@@ -34,253 +34,194 @@ static void put_i32(std::vector<uint8_t> &b, int32_t v)
     put_u32(b, (uint32_t)v);
 }
 
-// CRC-32 identical to AP_Math crc_crc32(): init 0, no final xor, poly 0xEDB88320
-static uint32_t crc32_ap(const uint8_t *data, uint32_t size, uint32_t crc = 0)
-{
-    for (uint32_t i = 0; i < size; i++) {
-        crc ^= data[i];
-        for (uint8_t j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)-(crc & 1));
-        }
-    }
-    return crc;
-}
-
-// recompute the crc field after mutating a buffer. The crc covers all
-// bytes after the magic, excluding the crc32 field itself.
-static void fix_crc(std::vector<uint8_t> &b)
-{
-    uint32_t crc = crc32_ap(b.data() + 4, ShowFile::CRC_OFFSET - 4);
-    crc = crc32_ap(b.data() + ShowFile::CRC_OFFSET + 4, b.size() - (ShowFile::CRC_OFFSET + 4), crc);
-    b[20] = crc & 0xff;
-    b[21] = (crc >> 8) & 0xff;
-    b[22] = (crc >> 16) & 0xff;
-    b[23] = (crc >> 24) & 0xff;
-}
-
-// build a valid v1 show file: 1 segment, keyframe_count keyframes, 2 light events.
-// keyframe times span [0, duration_ms] evenly (last keyframe == duration_ms).
-static std::vector<uint8_t> build_file(uint16_t keyframe_count = 3,
-                                       uint32_t duration_ms = 5000)
+// build a v2 file shell with placeholders for counts and crc
+static std::vector<uint8_t> build_v2(uint16_t drone_id, uint32_t duration_ms,
+                                     uint8_t version = ShowFile::FORMAT_VERSION,
+                                     bool bad_magic = false)
 {
     std::vector<uint8_t> b;
-    b.insert(b.end(), {'S', 'H', 'O', 'W'});
-    put_u8(b, ShowFile::FORMAT_VERSION);
-    put_u8(b, 0);                 // flags
-    put_u16(b, 7);                // drone_id
-    put_u32(b, duration_ms);
-    put_u16(b, keyframe_count);
-    put_u16(b, 2);                // light_count
-    put_u8(b, 1);                 // segment_count
-    b.insert(b.end(), 3, 0);      // reserved
-    put_u32(b, 0);                // crc placeholder
-
-    // one segment covering the whole show
-    b.insert(b.end(), {'s', 'e', 'g', '0'});
-    put_u32(b, 0);
-    put_u32(b, duration_ms);
-
-    // keyframes with monotonically increasing time
-    for (uint16_t i = 0; i < keyframe_count; i++) {
-        uint32_t t = 0;
-        if (keyframe_count > 1) {
-            t = (uint32_t)((uint64_t)i * duration_ms / (keyframe_count - 1));
-        }
-        put_u32(b, t);
-        put_i32(b, 0);
-        put_i32(b, 100 * i);
-        put_i32(b, -5000);
-        put_i16(b, 0);
-        put_i16(b, 100);
-        put_i16(b, 0);
-        put_i16(b, 0);
+    if (bad_magic) {
+        b.insert(b.end(), {'X', 'H', 'O', 'W'});
+    } else {
+        b.insert(b.end(), {'S', 'H', 'O', 'W'});
     }
-
-    // light events
-    put_u32(b, 0);
-    put_u8(b, 0);                 // overall colour
-    put_u8(b, 255); put_u8(b, 0); put_u8(b, 0);
-    put_u32(b, duration_ms / 2);
-    put_u8(b, 1);                 // pixel 1
-    put_u8(b, 0); put_u8(b, 255); put_u8(b, 0);
-
-    fix_crc(b);
+    put_u8(b, version);
+    put_u8(b, 0);                       // flags
+    put_u16(b, drone_id);
+    put_u32(b, duration_ms);
+    put_u32(b, 0);                      // event_count placeholder
+    put_u32(b, 0);                      // keyframe_count placeholder
+    put_u32(b, 0);                      // light_count placeholder
+    put_u8(b, 0);                       // segment_count
+    b.insert(b.end(), 3, 0);            // reserved
+    b.insert(b.end(), 4, 0);            // crc placeholder at [24,28)
     return b;
 }
 
-// field offsets within the default build (1 segment, 3 keyframes, 2 lights)
-static const uint32_t SEG_OFFSET = ShowFile::HEADER_SIZE;            // 24
-static const uint32_t KF_OFFSET = SEG_OFFSET + 12;                   // 36
-static const uint32_t LIGHT_OFFSET = KF_OFFSET + 3 * 24;             // 108
-// within a keyframe
-static const uint32_t KF_T = 0;
-static const uint32_t KF_POS_X = 4;
-static const uint32_t KF_VEL_Y = 18;
-static const uint32_t KF_YAW = 22;
-static const uint32_t KF_SIZE = 24;
-
-TEST(ShowFileParser, ValidFileParses)
+static void put_position(std::vector<uint8_t> &b, uint32_t t_ms,
+                         int32_t x, int32_t y, int32_t z,
+                         int16_t vx, int16_t vy, int16_t vz, int16_t yaw)
 {
-    std::vector<uint8_t> data = build_file();
-    ShowFileParser parser;
-    EXPECT_TRUE(parser.parse(data.data(), data.size()));
-    EXPECT_TRUE(parser.loaded());
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::NONE);
-    EXPECT_EQ(parser.drone_id(), 7U);
-    EXPECT_EQ(parser.duration_ms(), 5000U);
-    EXPECT_EQ(parser.keyframe_count(), 3U);
-    EXPECT_EQ(parser.light_count(), 2U);
-    EXPECT_EQ(parser.segment_count(), 1U);
-    // keyframe values
-    EXPECT_EQ(parser.keyframes()[0].t_ms, 0U);
-    EXPECT_EQ(parser.keyframes()[1].t_ms, 2500U);
-    EXPECT_EQ(parser.keyframes()[2].t_ms, 5000U);
-    EXPECT_EQ(parser.keyframes()[1].pos_y_mm, 100);
-    EXPECT_EQ(parser.keyframes()[2].pos_y_mm, 200);
-    EXPECT_EQ(parser.keyframes()[0].pos_z_mm, -5000);
-    EXPECT_EQ(parser.keyframes()[1].vel_y_mms, 100);
-    // light events
-    EXPECT_EQ(parser.lights()[0].index, 0U);
-    EXPECT_EQ(parser.lights()[0].r, 255U);
-    EXPECT_EQ(parser.lights()[1].index, 1U);
-    EXPECT_EQ(parser.lights()[1].g, 255U);
-    // segment
-    EXPECT_EQ(parser.segments()[0].end_ms, 5000U);
-    EXPECT_STREQ(parser.segments()[0].name, "seg0");
+    put_u8(b, ShowFile::EVENT_POSITION);
+    put_u32(b, t_ms);
+    put_i32(b, x);
+    put_i32(b, y);
+    put_i32(b, z);
+    put_i16(b, vx);
+    put_i16(b, vy);
+    put_i16(b, vz);
+    put_i16(b, yaw);
+}
+
+static void put_light(std::vector<uint8_t> &b, uint32_t t_ms, uint8_t index,
+                      uint8_t r, uint8_t g, uint8_t bl)
+{
+    put_u8(b, ShowFile::EVENT_LIGHT);
+    put_u32(b, t_ms);
+    put_u8(b, index);
+    put_u8(b, r);
+    put_u8(b, g);
+    put_u8(b, bl);
+}
+
+// finalise header counts and crc using the parser's own accumulator
+static void finalise(std::vector<uint8_t> &b, uint32_t n_pos, uint32_t n_light)
+{
+    const uint32_t n_events = n_pos + n_light;
+    for (int i = 0; i < 4; i++) {
+        b[4 + 8 + i] = (n_events >> (8 * i)) & 0xff;
+        b[4 + 12 + i] = (n_pos >> (8 * i)) & 0xff;
+        b[4 + 16 + i] = (n_light >> (8 * i)) & 0xff;
+    }
+    uint32_t crc = ShowFileParser::crc_accumulate(b.data(), b.size(), 0, 0);
+    for (int i = 0; i < 4; i++) {
+        b[4 + ShowFile::CRC_OFFSET + i] = (crc >> (8 * i)) & 0xff;
+    }
+}
+
+// a simple 3-position + 2-light file (2000ms duration)
+static std::vector<uint8_t> simple_file()
+{
+    std::vector<uint8_t> b = build_v2(7, 2000);
+    put_position(b, 0, 0, 0, -5000, 0, 0, 0, 0);
+    put_light(b, 0, 0, 255, 0, 0);
+    put_position(b, 1000, 1000, 2000, -5000, 0, 0, 0, 0);
+    put_light(b, 1000, 0, 0, 255, 0);
+    put_position(b, 2000, 2000, 4000, -5000, 0, 0, 0, 0);
+    finalise(b, 3, 2);
+    return b;
+}
+
+TEST(ShowFileParser, HeaderFields)
+{
+    std::vector<uint8_t> b = simple_file();
+    ShowFileParser p;
+    EXPECT_TRUE(p.parse_header(b.data(), b.size()));
+    EXPECT_TRUE(p.loaded());
+    EXPECT_EQ(p.drone_id(), 7);
+    EXPECT_EQ(p.duration_ms(), 2000U);
+    EXPECT_EQ(p.keyframe_count(), 3U);
+    EXPECT_EQ(p.light_count(), 2U);
+    EXPECT_EQ(p.event_count(), 5U);
+    EXPECT_EQ(p.failure(), ShowFileParser::Failure::NONE);
 }
 
 TEST(ShowFileParser, RejectsBadMagic)
 {
-    std::vector<uint8_t> data = build_file();
-    data[0] = 'X';
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::INVALID_MAGIC);
+    std::vector<uint8_t> b = build_v2(7, 1000, ShowFile::FORMAT_VERSION, true);
+    ShowFileParser p;
+    EXPECT_FALSE(p.parse_header(b.data(), b.size()));
+    EXPECT_EQ(p.failure(), ShowFileParser::Failure::INVALID_MAGIC);
 }
 
-TEST(ShowFileParser, RejectsUnsupportedVersion)
+TEST(ShowFileParser, RejectsBadVersion)
 {
-    std::vector<uint8_t> data = build_file();
-    data[4] = 2;
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::UNSUPPORTED_VERSION);
-}
-
-TEST(ShowFileParser, RejectsBadCrc)
-{
-    std::vector<uint8_t> data = build_file();
-    data[KF_OFFSET + 8] ^= 0x01;  // corrupt a keyframe byte without fixing crc
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::BAD_CRC);
+    std::vector<uint8_t> b = build_v2(7, 1000, 99);
+    ShowFileParser p;
+    EXPECT_FALSE(p.parse_header(b.data(), b.size()));
+    EXPECT_EQ(p.failure(), ShowFileParser::Failure::UNSUPPORTED_VERSION);
 }
 
 TEST(ShowFileParser, RejectsTruncatedHeader)
 {
-    std::vector<uint8_t> data = build_file();
-    data.resize(20);
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::TRUNCATED);
+    std::vector<uint8_t> b = simple_file();
+    b.resize(4 + 8);    // header cut short
+    ShowFileParser p;
+    EXPECT_FALSE(p.parse_header(b.data(), b.size()));
+    EXPECT_EQ(p.failure(), ShowFileParser::Failure::TRUNCATED);
 }
 
-TEST(ShowFileParser, RejectsTruncatedKeyframes)
+TEST(ShowFileParser, RejectsBadEventCount)
 {
-    std::vector<uint8_t> data = build_file();
-    data.resize(data.size() - 8);
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::TRUNCATED);
+    std::vector<uint8_t> b = build_v2(7, 1000);
+    put_position(b, 0, 0, 0, -5000, 0, 0, 0, 0);
+    finalise(b, 1, 0);
+    b[4 + 8] = 99;      // corrupt event_count to 99
+    ShowFileParser p;
+    EXPECT_FALSE(p.parse_header(b.data(), b.size()));
+    EXPECT_EQ(p.failure(), ShowFileParser::Failure::BAD_EVENT_COUNT);
 }
 
-TEST(ShowFileParser, RejectsExtraData)
+TEST(ShowFileParser, ParsePositionEvent)
 {
-    std::vector<uint8_t> data = build_file();
-    data.push_back(0);
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::EXTRA_DATA);
+    std::vector<uint8_t> b = simple_file();
+    ShowFileParser p;
+    ASSERT_TRUE(p.parse_header(b.data(), b.size()));
+    const uint8_t *pos = b.data() + 4 + ShowFile::HEADER_SIZE;
+    const uint8_t *end = b.data() + b.size();
+    uint8_t type;
+    uint32_t t_ms;
+    ShowFile::Keyframe kf;
+    ShowFile::LightEvent le;
+    ASSERT_TRUE(p.parse_event(pos, end, type, t_ms, kf, le));
+    EXPECT_EQ(type, ShowFile::EVENT_POSITION);
+    EXPECT_EQ(t_ms, 0U);
+    EXPECT_EQ(kf.pos_x_mm, 0);
+    EXPECT_EQ(kf.pos_z_mm, -5000);
+    ASSERT_TRUE(p.parse_event(pos, end, type, t_ms, kf, le));
+    EXPECT_EQ(type, ShowFile::EVENT_LIGHT);
+    EXPECT_EQ(le.r, 255);
+    ASSERT_TRUE(p.parse_event(pos, end, type, t_ms, kf, le));
+    EXPECT_EQ(type, ShowFile::EVENT_POSITION);
+    EXPECT_EQ(t_ms, 1000U);
+    EXPECT_EQ(kf.pos_y_mm, 2000);
+    while (p.parse_event(pos, end, type, t_ms, kf, le)) {
+    }
+    EXPECT_EQ(pos, end);
 }
 
-TEST(ShowFileParser, RejectsTooManyKeyframes)
+TEST(ShowFileParser, RejectsUnknownEventType)
 {
-    std::vector<uint8_t> data = build_file(ShowFile::MAX_KEYFRAMES + 1);
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::TOO_MANY_KEYFRAMES);
+    std::vector<uint8_t> b = build_v2(7, 1000);
+    put_position(b, 0, 0, 0, -5000, 0, 0, 0, 0);
+    put_u8(b, 99);              // unknown event type
+    put_u32(b, 100);
+    finalise(b, 1, 0);
+    ShowFileParser p;
+    ASSERT_TRUE(p.parse_header(b.data(), b.size()));
+    const uint8_t *pos = b.data() + 4 + ShowFile::HEADER_SIZE;
+    const uint8_t *end = b.data() + b.size();
+    uint8_t type;
+    uint32_t t_ms;
+    ShowFile::Keyframe kf;
+    ShowFile::LightEvent le;
+    ASSERT_TRUE(p.parse_event(pos, end, type, t_ms, kf, le));
+    EXPECT_FALSE(p.parse_event(pos, end, type, t_ms, kf, le));
 }
 
-TEST(ShowFileParser, RejectsNonMonotonicTime)
+TEST(ShowFileParser, CrcAccumulateSkipsMagicAndField)
 {
-    std::vector<uint8_t> data = build_file();
-    // third keyframe time (i=2) -> 1000 ms, out of order
-    const uint32_t off = KF_OFFSET + 2 * KF_SIZE + KF_T;
-    data[off] = 0xE8; data[off + 1] = 0x03; data[off + 2] = 0; data[off + 3] = 0;
-    fix_crc(data);
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::BAD_KEYFRAME_TIME);
-}
-
-TEST(ShowFileParser, RejectsPosOutOfRange)
-{
-    std::vector<uint8_t> data = build_file();
-    // second keyframe pos_x = 10000001 mm (> 10 km)
-    const uint32_t off = KF_OFFSET + 1 * KF_SIZE + KF_POS_X;
-    data[off] = 0x81; data[off + 1] = 0x96; data[off + 2] = 0x98; data[off + 3] = 0x00;
-    fix_crc(data);
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::POS_OUT_OF_RANGE);
-}
-
-TEST(ShowFileParser, RejectsVelOutOfRange)
-{
-    std::vector<uint8_t> data = build_file();
-    // first keyframe vel_y = 30001 mm/s (> 30 m/s limit, fits in int16)
-    const uint32_t off = KF_OFFSET + 0 * KF_SIZE + KF_VEL_Y;
-    data[off] = 0x31; data[off + 1] = 0x75;
-    fix_crc(data);
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::VEL_OUT_OF_RANGE);
-}
-
-TEST(ShowFileParser, RejectsYawOutOfRange)
-{
-    std::vector<uint8_t> data = build_file();
-    // first keyframe yaw_cd = 18001 (> 18000)
-    const uint32_t off = KF_OFFSET + 0 * KF_SIZE + KF_YAW;
-    data[off] = 0x51; data[off + 1] = 0x46;
-    fix_crc(data);
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::YAW_OUT_OF_RANGE);
-}
-
-TEST(ShowFileParser, RejectsLightAfterDuration)
-{
-    std::vector<uint8_t> data = build_file();
-    // second light event t = 5001 ms (> duration 5000)
-    const uint32_t off = LIGHT_OFFSET + 8;
-    data[off] = 0x89; data[off + 1] = 0x13; data[off + 2] = 0; data[off + 3] = 0;
-    fix_crc(data);
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::BAD_LIGHT_TIME);
-}
-
-TEST(ShowFileParser, RejectsBadSegment)
-{
-    std::vector<uint8_t> data = build_file();
-    // segment start_ms = 6000 > end_ms = 5000
-    const uint32_t off = SEG_OFFSET + 4;
-    data[off] = 0x70; data[off + 1] = 0x17; data[off + 2] = 0; data[off + 3] = 0;
-    fix_crc(data);
-    ShowFileParser parser;
-    EXPECT_FALSE(parser.parse(data.data(), data.size()));
-    EXPECT_EQ(parser.failure(), ShowFileParser::Failure::BAD_SEGMENT);
+    std::vector<uint8_t> b = simple_file();
+    uint32_t crc = ShowFileParser::crc_accumulate(b.data(), b.size(), 0, 0);
+    uint32_t stored = 0;
+    for (int i = 0; i < 4; i++) {
+        stored |= (uint32_t)b[4 + ShowFile::CRC_OFFSET + i] << (8 * i);
+    }
+    EXPECT_EQ(crc, stored);
+    // chunked accumulation gives the same result as a single pass
+    uint32_t c2 = ShowFileParser::crc_accumulate(b.data(), 10, 0, 0);
+    c2 = ShowFileParser::crc_accumulate(b.data() + 10, b.size() - 10, 10, c2);
+    EXPECT_EQ(c2, stored);
 }
 
 AP_GTEST_PANIC()

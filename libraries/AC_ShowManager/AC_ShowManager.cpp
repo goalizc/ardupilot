@@ -14,14 +14,7 @@
 
 extern const AP_HAL::HAL& hal;
 
-#ifndef HAL_BOARD_SHOW_DIRECTORY
-#  if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-#    define HAL_BOARD_SHOW_DIRECTORY "./show"
-#  else
-#    define HAL_BOARD_SHOW_DIRECTORY "/SHOW"
-#  endif
-#endif
-#define SHOW_FILE (HAL_BOARD_SHOW_DIRECTORY "/show.bin")
+#include "ShowFileSource.h"
 
 const AP_Param::GroupInfo AC_ShowManager::var_info[] = {
 
@@ -167,6 +160,7 @@ AC_ShowManager::AC_ShowManager(void)
     _start_internal_usec = 0;
     _stage = 0;
     _status_requested = false;
+    _load_attempted = false;
 }
 
 // compute_start_epoch_ms - convert a GPS time-of-week start time to an
@@ -385,12 +379,12 @@ bool AC_ShowManager::clear()
         GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: failed to delete show file");
         return false;
     }
-    _parser.reset();
+    _reader.close();
     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show cleared");
     return true;
 }
 
-// load_from_file - read and parse the show file from storage
+// load_from_file - open and verify the show file from storage
 bool AC_ShowManager::load_from_file(bool report)
 {
     // tell the scheduler to expect slow SD card IO
@@ -403,43 +397,37 @@ bool AC_ShowManager::load_from_file(bool report)
         }
         return true;
     }
-    if (st.st_size <= 0 || st.st_size > 65536) {
-        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: file size %ld unsupported", (long)st.st_size);
+    if (st.st_size <= 4 + ShowFile::HEADER_SIZE) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: file too small");
         return false;
     }
 
-    const int fd = AP::FS().open(SHOW_FILE, O_RDONLY);
-    if (fd == -1) {
-        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: failed to open show file");
+    _reader.close();
+    if (!_reader.load_and_verify(_source)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show load failed: %s",
+                      failure_string(_reader.failure()));
         return false;
     }
+    // keep the text within the 50 char STATUSTEXT limit
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show loaded: %u keyframes, %u lights",
+                  (unsigned)_reader.keyframe_count(), (unsigned)_reader.light_count());
+    return true;
+}
 
-    uint8_t *buf = (uint8_t *)malloc(st.st_size);
-    if (buf == nullptr) {
-        AP::FS().close(fd);
-        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: out of memory loading show");
-        return false;
-    }
+// start_streaming - begin windowed playback from the start of the file.
+// Refills run on a dedicated IO thread: ArduPilot forbids file IO on the
+// main thread while the vehicle is armed, and the show streams while
+// flying.
+bool AC_ShowManager::start_streaming()
+{
+    _reader.enable_io_thread(true);
+    return _reader.start();
+}
 
-    bool ok = false;
-    const int32_t read_len = AP::FS().read(fd, buf, st.st_size);
-    if (read_len == st.st_size) {
-        ok = _parser.parse(buf, st.st_size);
-        if (ok) {
-            // keep the text within the 50 char STATUSTEXT limit
-            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Show loaded: %u keyframes, %u lights, %u segments",
-                          _parser.keyframe_count(), _parser.light_count(),
-                          _parser.segment_count());
-        } else {
-            GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show load failed: %s", failure_string(_parser.failure()));
-        }
-    } else {
-        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Show: read error loading show file");
-    }
-
-    free(buf);
-    AP::FS().close(fd);
-    return ok;
+// stream_update - advance the streaming window for the show clock
+void AC_ShowManager::stream_update(uint32_t t_ms)
+{
+    _reader.update(t_ms);
 }
 
 // failure_string - map a parser failure to a human readable string
@@ -458,24 +446,10 @@ const char *AC_ShowManager::failure_string(ShowFileParser::Failure failure) cons
         return "truncated file";
     case ShowFileParser::Failure::EXTRA_DATA:
         return "extra data";
-    case ShowFileParser::Failure::TOO_MANY_KEYFRAMES:
-        return "too many keyframes";
-    case ShowFileParser::Failure::TOO_MANY_LIGHT_EVENTS:
-        return "too many light events";
-    case ShowFileParser::Failure::TOO_MANY_SEGMENTS:
-        return "too many segments";
-    case ShowFileParser::Failure::BAD_KEYFRAME_TIME:
-        return "keyframe time out of order";
-    case ShowFileParser::Failure::POS_OUT_OF_RANGE:
-        return "position out of range";
-    case ShowFileParser::Failure::VEL_OUT_OF_RANGE:
-        return "velocity out of range";
-    case ShowFileParser::Failure::YAW_OUT_OF_RANGE:
-        return "yaw out of range";
-    case ShowFileParser::Failure::BAD_LIGHT_TIME:
-        return "light time out of order";
-    case ShowFileParser::Failure::BAD_SEGMENT:
-        return "bad segment bounds";
+    case ShowFileParser::Failure::UNKNOWN_EVENT:
+        return "unknown event type";
+    case ShowFileParser::Failure::BAD_EVENT_COUNT:
+        return "bad event count";
     }
     return "unknown";
 }
