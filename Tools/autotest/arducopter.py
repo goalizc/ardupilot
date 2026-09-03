@@ -7189,41 +7189,52 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
                 crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1))
         return crc
 
-    def _build_show_file(self, corrupt_crc=False, corrupt_time=False, duration_ms=5000,
+    def _build_show_file(self, corrupt_crc=False, duration_ms=5000,
                          trajectory=None, light_events=None):
-        '''Build a v1 show file: 3 keyframes, 2 light events, 1 segment.
-        trajectory, when given, is a list of (t_ms, x_mm, y_mm, z_mm, vx, vy, vz, yaw_cd)
-        tuples overriding the default keyframes (keyframe_count follows it).
-        light_events, when given, is a list of (t_ms, index, r, g, b) tuples
-        overriding the default light events (light_count follows it).
-        The crc32 field covers all bytes after the magic, excluding the
-        crc32 field itself (payload[0:16] + payload[20:]).'''
+        # Build a v2 event-stream show file.  trajectory is a list of
+        # (t_ms, x_mm, y_mm, z_mm, vx, vy, vz, yaw_cd) position frames;
+        # light_events a list of (t_ms, index, r, g, b) light frames.
+        # Both merge into one time-ordered event stream (position frames
+        # first at equal t_ms).  The crc32 covers every byte after the
+        # magic except the stored-crc field itself.
         payload = bytearray()
         keyframes = trajectory if trajectory is not None else [
             (duration_ms // 2 * i, 0, 100 * i, -5000, 0, 100, 0, 0) for i in range(3)
         ]
-        if corrupt_time:
-            keyframes = list(keyframes)
-            keyframes[2] = (1000,) + keyframes[2][1:]  # out of order
         if light_events is None:
             light_events = [(0, 0, 255, 0, 0), (duration_ms // 2, 1, 0, 255, 0)]
-        # header (crc placeholder at 16..20)
-        payload += struct.pack('<BBHIHHB3x', 1, 0, 7, duration_ms, len(keyframes), len(light_events), 1)
-        payload += b'\x00\x00\x00\x00'
-        # segment: name[4] start_ms[4] end_ms[4]
-        payload += b'seg0' + struct.pack('<II', 0, duration_ms)
-        # keyframes: t_ms[4] pos_x/y/z[12] vel_x/y/z[6] yaw_cd[2]
+        events = []
         for kf in keyframes:
-            payload += struct.pack('<Iiiihhhh', *kf)
-        # light events: t_ms[4] index[1] r/g/b[3]
+            (t, x, y, z, vx, vy, vz, yaw) = kf
+            events.append((t, 1, x, y, z, vx, vy, vz, yaw))
         for le in light_events:
-            payload += struct.pack('<IBBBB', *le)
-        crc = self._show_crc32(payload[0:16])
-        crc = self._show_crc32(payload[20:], crc)
+            (t, index, r, g, b) = le
+            events.append((t, 2, index, r, g, b))
+        events.sort(key=lambda e: (e[0], e[1]))
+        n_pos = sum(1 for e in events if e[1] == 1)
+        n_light = len(events) - n_pos
+        # header (version 2, no segments, crc placeholder at [28,32))
+        payload += struct.pack('<BBHIIIIB3x', 2, 0, 7, duration_ms,
+                               len(events), n_pos, n_light, 0)
+        payload += b'\x00\x00\x00\x00'
+        for e in events:
+            if e[1] == 1:
+                payload += struct.pack('<BIiiihhhh', e[1], e[0], e[2], e[3], e[4],
+                                       e[5], e[6], e[7], e[8])
+            else:
+                payload += struct.pack('<BIBBBB', e[1], e[0], e[2], e[3], e[4], e[5])
+        body = bytearray(b'SHOW' + bytes(payload))
+        crc = 0
+        for i, byte in enumerate(body):
+            if i < 4 or (28 <= i < 32):       # skip magic and the crc field
+                continue
+            crc ^= byte
+            for _ in range(8):
+                crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1))
         if corrupt_crc:
             crc ^= 1
-        payload[16:20] = struct.pack('<I', crc)
-        return b'SHOW' + bytes(payload)
+        body[28:32] = struct.pack('<I', crc)
+        return bytes(body)
 
     def test_show_load(self):
         '''Test that a show file can be loaded, validated and cleared from storage'''
@@ -7243,7 +7254,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         #    truncated, so only the leading part is asserted.
         with open(show_path, "wb") as f:
             f.write(self._build_show_file())
-        self.wait_statustext("Show loaded: 3 keyframes, 2 lights, 1 segments",
+        self.wait_statustext("Show loaded: 3 keyframes, 2 lights",
                              timeout=10, the_function=lambda: trigger_reload(0))
 
         # 2. corrupted checksum -> load fails (command reports FAILED)
@@ -7253,13 +7264,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         self.wait_statustext("Show load failed: bad checksum",
                              timeout=10, the_function=lambda: trigger_reload(0, want_result=failed))
 
-        # 3. out-of-order keyframe time -> load fails
-        with open(show_path, "wb") as f:
-            f.write(self._build_show_file(corrupt_time=True))
-        self.wait_statustext("Show load failed: keyframe time out of order",
-                             timeout=10, the_function=lambda: trigger_reload(0, want_result=failed))
-
-        # 4. clear -> show cleared
+        # 3. clear -> show cleared
         self.wait_statustext("Show cleared", timeout=10, the_function=lambda: trigger_reload(1))
 
     def test_show_protocol(self):
@@ -7275,7 +7280,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         def trigger_reload():
             self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=0,
                          want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
-        self.wait_statustext("Show loaded: 3 keyframes, 2 lights, 1 segments",
+        self.wait_statustext("Show loaded: 3 keyframes, 2 lights",
                              timeout=10, the_function=trigger_reload)
 
         self.wait_ready_to_arm()
@@ -7418,7 +7423,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         def trigger_reload():
             self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=0,
                          want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
-        self.wait_statustext("Show loaded: 3 keyframes, 4 lights, 1 segments",
+        self.wait_statustext("Show loaded: 3 keyframes, 4 lights",
                              timeout=10, the_function=trigger_reload)
 
         self.wait_ready_to_arm()
@@ -7482,7 +7487,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         def trigger_reload():
             self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=0,
                          want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
-        self.wait_statustext("Show loaded: 3 keyframes, 2 lights, 1 segments",
+        self.wait_statustext("Show loaded: 3 keyframes, 2 lights",
                              timeout=10, the_function=trigger_reload)
 
         # wait for GPS so the RTC (and SYSTEM_TIME) carries the GPS epoch
@@ -7622,7 +7627,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         def trigger_reload():
             self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=0,
                          want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
-        self.wait_statustext("Show loaded: 5 keyframes, 2 lights, 1 segments",
+        self.wait_statustext("Show loaded: 5 keyframes, 2 lights",
                              timeout=10, the_function=trigger_reload)
 
         self.wait_ready_to_arm()

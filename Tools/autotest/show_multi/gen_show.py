@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Generate a v1 drone-show choreography file for the multi-vehicle demo.
+"""Generate a v2 drone-show event-stream file for the multi-vehicle demo.
 
-Writes a ShowFile v1 file (see libraries/AC_ShowManager/ShowFile.h):
-header + 1 segment + keyframes (1s spacing) + light events.  The
-default 60s choreography is a rectangle out-and-back at constant
-altitude: hover, fly 20m east, 20m north, back to the origin, hover.
+Writes a ShowFile v2 file (see libraries/AC_ShowManager/ShowFile.h):
+magic + 28B header + a time-ordered event stream of position frames
+(type 1) and light frames (type 2).  The default 60s choreography is a
+rectangle out-and-back at constant altitude: hover, fly east, fly
+north, back to the origin, hover.
 
 Usage:
   gen_show.py OUT.bin [duration_s] [--drone-id N]
@@ -15,11 +16,19 @@ import sys
 
 MAGIC = b"SHOW"
 POLY = 0xEDB88320
+HEADER_SIZE = 28
+CRC_OFFSET = 24          # relative to the byte after the magic
+EVENT_POSITION = 1
+EVENT_LIGHT = 2
 
 
-def crc32(data, crc=0):
-    """CRC-32 matching AP_Math crc_crc32: init 0, no final xor."""
-    for byte in data:
+def crc32_stream(data, crc=0):
+    """CRC over file bytes, skipping the magic [0,4) and the stored crc
+    field [4+CRC_OFFSET, 4+CRC_OFFSET+4) - mirrors the firmware."""
+    for i, byte in enumerate(data):
+        off = i
+        if off < 4 or (4 + CRC_OFFSET <= off < 4 + CRC_OFFSET + 4):
+            continue
         crc ^= byte
         for _ in range(8):
             crc = (crc >> 1) ^ (POLY & -(crc & 1))
@@ -27,35 +36,28 @@ def crc32(data, crc=0):
 
 
 def generate(duration_s=60, drone_id=7):
-    """Return the full show file bytes for a rectangle out-and-back flight."""
+    """Return the full v2 show file for a rectangle out-and-back flight."""
     duration_ms = duration_s * 1000
     alt_mm = -5000          # 5m, NED down-positive
-    # displacement scales with duration so the leg speed stays gentle
-    # (20m at 60s = ~0.9 m/s); hover first so the aircraft is settled at
-    # the origin before the trajectory demands any motion
-    span = 20000 * duration_s // 60
-    # waypoints (t_ms, x_mm=N, y_mm=E) in the show frame
-    hover_end = int(0.20 * duration_ms)     # hover at the origin
-    leg1_end = int(0.45 * duration_ms)      # then east
-    leg2_end = int(0.70 * duration_ms)      # then north
-    leg3_end = int(0.90 * duration_ms)      # return to origin
-    east_m = span
-    north_m = span
+    span = 20000 * duration_s // 60          # displacement scales with duration
+    hover_end = int(0.20 * duration_ms)
+    leg1_end = int(0.45 * duration_ms)
+    leg2_end = int(0.70 * duration_ms)
+    leg3_end = int(0.90 * duration_ms)
     waypoints = [
         (0, 0, 0),
         (hover_end, 0, 0),
-        (leg1_end, 0, east_m),
-        (leg2_end, north_m, east_m),
+        (leg1_end, 0, span),
+        (leg2_end, span, span),
         (leg3_end, 0, 0),
         (duration_ms, 0, 0),
     ]
 
-    # 1s-spaced keyframes with the segment velocity filled in
-    keyframes = []
+    # 1s-spaced position frames
+    frames = []                      # (t_ms, type, payload...)
     n_kf = duration_s + 1
     for i in range(n_kf):
         t = i * 1000
-        # find the leg containing t
         for wi in range(len(waypoints) - 1):
             (t0, x0, y0) = waypoints[wi]
             (t1, x1, y1) = waypoints[wi + 1]
@@ -63,60 +65,72 @@ def generate(duration_s=60, drone_id=7):
                 frac = (t - t0) / float(t1 - t0)
                 x = int(round(x0 + (x1 - x0) * frac))
                 y = int(round(y0 + (y1 - y0) * frac))
-                vx = int(round((x1 - x0) * 1000.0 / (t1 - t0)))  # mm/s
+                vx = int(round((x1 - x0) * 1000.0 / (t1 - t0)))
                 vy = int(round((y1 - y0) * 1000.0 / (t1 - t0)))
                 break
         else:
             raise SystemExit("internal waypoint search failed")
-        keyframes.append((t, x, y, alt_mm, vx, vy, 0, 0))
+        frames.append((t, EVENT_POSITION, x, y, alt_mm, vx, vy, 0, 0))
 
-    # two overall-colour light events: red at the start, green mid-show
-    light_events = [(0, 0, 255, 0, 0), (duration_ms // 2, 0, 0, 255, 0)]
+    # two overall-colour light events
+    frames.append((0, EVENT_LIGHT, 0, 255, 0, 0))
+    frames.append((duration_ms // 2, EVENT_LIGHT, 0, 0, 255, 0))
+    frames.sort(key=lambda f: (f[0], f[1]))   # position before light at same t
 
-    payload = bytearray()
-    payload += struct.pack('<BBHIHHB3x', 1, 0, drone_id, duration_ms,
-                           len(keyframes), len(light_events), 1)
-    payload += b'\x00\x00\x00\x00'          # crc placeholder (bytes 16..20)
-    payload += b'demo' + struct.pack('<II', 0, duration_ms)   # 1 segment
-    for kf in keyframes:
-        payload += struct.pack('<Iiiihhhh', *kf)
-    for le in light_events:
-        payload += struct.pack('<IBBBB', *le)
-    crc = crc32(payload[0:16])
-    crc = crc32(payload[20:], crc)
-    payload[16:20] = struct.pack('<I', crc)
-    return MAGIC + bytes(payload)
+    n_pos = sum(1 for f in frames if f[1] == EVENT_POSITION)
+    n_light = sum(1 for f in frames if f[1] == EVENT_LIGHT)
+
+    b = bytearray()
+    b += MAGIC
+    b += struct.pack('<BBHIIIIB3x', 2, 0, drone_id, duration_ms,
+                     n_pos + n_light, n_pos, n_light, 0)
+    b += b'\x00\x00\x00\x00'                  # crc placeholder [28,32)
+    for f in frames:
+        t, typ = f[0], f[1]
+        if typ == EVENT_POSITION:
+            _, _, x, y, z, vx, vy, vz, yaw = f
+            b += struct.pack('<BIiiihhhh', typ, t, x, y, z, vx, vy, vz, yaw)
+        else:
+            _, _, index, r, g, bl = f
+            b += struct.pack('<BIBBBB', typ, t, index, r, g, bl)
+    crc = crc32_stream(bytes(b))
+    b[4 + CRC_OFFSET:4 + CRC_OFFSET + 4] = struct.pack('<I', crc)
+    return bytes(b)
 
 
 def check(path):
-    """Validate a generated file: magic/version/crc/counts/time monotonic."""
+    """Validate: magic/version/crc/counts/t-time monotonic/type known."""
     with open(path, 'rb') as f:
         data = f.read()
     if not data.startswith(MAGIC):
         raise SystemExit("bad magic")
-    (version, flags, drone_id, duration_ms, kf_count, light_count,
-     seg_count) = struct.unpack_from('<BBHIHHB', data, 4)
-    if version != 1:
+    (version, _flags, drone_id, duration_ms, n_events, n_pos, n_light,
+     _n_seg) = struct.unpack_from('<BBHIIIIB', data, 4)
+    if version != 2:
         raise SystemExit("bad version %u" % version)
-    stored = struct.unpack_from('<I', data, 20)[0]
-    calc = crc32(data[4:20])
-    calc = crc32(data[24:], calc)
-    if stored != calc:
-        raise SystemExit("crc mismatch: stored=%08x calc=%08x" % (stored, calc))
-    pos = 24 + seg_count * 12
+    if n_events != n_pos + n_light:
+        raise SystemExit("event count mismatch")
+    stored = struct.unpack_from('<I', data, 28)[0]
+    if stored != crc32_stream(data):
+        raise SystemExit("crc mismatch: stored=%08x" % stored)
+    pos = 32
     last_t = -1
-    for i in range(kf_count):
-        (t,) = struct.unpack_from('<I', data, pos)
+    for _ in range(n_events):
+        (typ, t) = struct.unpack_from('<BI', data, pos)
+        if typ not in (EVENT_POSITION, EVENT_LIGHT):
+            raise SystemExit("unknown event type %u" % typ)
         if t < last_t:
-            raise SystemExit("keyframe time not monotonic at %d" % i)
+            raise SystemExit("event time not monotonic")
         last_t = t
-        pos += 24
-    for i in range(light_count):
-        (t,) = struct.unpack_from('<I', data, pos)
-        pos += 8
-    print("OK: version=%u drone_id=%u duration=%ums keyframes=%u lights=%u "
-          "segments=%u total=%u bytes" %
-          (version, drone_id, duration_ms, kf_count, light_count, seg_count, len(data)))
+        pos += 5
+        if typ == EVENT_POSITION:
+            pos += 20
+        else:
+            pos += 4
+    if pos != len(data):
+        raise SystemExit("trailing bytes: %u" % (len(data) - pos))
+    print("OK: v2 drone_id=%u duration=%ums events=%u (pos=%u light=%u) "
+          "total=%u bytes" % (drone_id, duration_ms, n_events, n_pos, n_light, len(data)))
 
 
 def main():
