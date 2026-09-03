@@ -182,6 +182,17 @@ void ModeShow::_takeoff_start()
 {
     _set_stage(Stage::TAKEOFF);
 
+    // start the streaming window reader now, on the runway: the IO
+    // thread prefills the first blocks during the climb so the
+    // performance always begins with data ready (never in flight)
+    if (!copter.show_manager.stream_started()) {
+        if (!copter.show_manager.start_streaming()) {
+            GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "Show: cannot start show data stream");
+            _error_start();
+            return;
+        }
+    }
+
     // initialise yaw hold and the vertical position controller, mirroring
     // the guided takeoff
     auto_yaw.set_mode(AutoYaw::Mode::HOLD);
@@ -214,6 +225,14 @@ void ModeShow::_takeoff_run()
     copter.mode_auto.auto_takeoff.run();
 
     if (copter.mode_auto.auto_takeoff.complete) {
+        // never begin the performance without show data ready; the IO
+        // thread had the whole climb to prefill, so this only triggers on
+        // a real IO failure - wait a moment, then fail safe
+        if (!copter.show_manager.stream_ready_to_play()) {
+            GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "Show: show data not ready");
+            _error_start();
+            return;
+        }
         _performing_start();
     }
 }
@@ -226,9 +245,8 @@ void ModeShow::_performing_start()
     // the choreography clock starts when the takeoff has completed, so the
     // first keyframe (t=0) matches the position reached by the takeoff
     _performance_t0_usec = copter.show_manager.elapsed_usec();
-    // load the choreography track into the player
-    _player.set_track(copter.show_manager.keyframes(), copter.show_manager.keyframe_count());
-    _light_player.set_track(copter.show_manager.lights(), copter.show_manager.light_count());
+    // the streaming reader was started at takeoff; player tracks are
+    // refreshed from the window each control cycle
     _last_play_ms = 0;
     _drift_counter = 0;
     _last_light_ms = 0;
@@ -247,6 +265,33 @@ void ModeShow::_performing_run()
     const uint32_t ctrl_interval_ms = 1000U / MAX(1U, (uint32_t)copter.show_manager.ctrl_rate_hz());
     if (now_ms - _last_play_ms >= ctrl_interval_ms) {
         _last_play_ms = now_ms;
+        const int64_t show_elapsed_ms = (copter.show_manager.elapsed_usec() - _performance_t0_usec) / 1000;
+        if (show_elapsed_ms >= 0) {
+            // advance the streaming window and refresh the player tracks
+            // from the current window (position + light views)
+            copter.show_manager.stream_update((uint32_t)show_elapsed_ms);
+            if (!copter.show_manager.stream_can_evaluate((uint32_t)show_elapsed_ms)) {
+                GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "Show: show data unavailable");
+                _error_start();
+                return;
+            }
+            const ShowFile::Keyframe *kfs = nullptr;
+            uint16_t kf_count = 0;
+            if (copter.show_manager.stream_position_view(kfs, kf_count)) {
+                _player.set_track(kfs, kf_count);
+            } else {
+                // no window yet (e.g. the IO thread is still loading the
+                // first block); data is available per can_evaluate, so
+                // skip this cycle and retry on the next one
+                copter.mode_guided.run();
+                return;
+            }
+            const ShowFile::LightEvent *les = nullptr;
+            uint16_t le_count = 0;
+            if (copter.show_manager.stream_light_view(les, le_count)) {
+                _light_player.set_track(les, le_count);
+            }
+        }
         _send_play_target();
         _check_drift();
 #if HAL_LOGGING_ENABLED
