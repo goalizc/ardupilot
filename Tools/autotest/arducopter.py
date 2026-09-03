@@ -7543,6 +7543,30 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         self.delay_sim_time(2, reason="vehicle to settle on the ground")
         self.disarm_vehicle(force=True)
 
+        # P6: verify the SHOW/SHEV log messages were written, carrying the
+        # GPS absolute time needed to align logs across vehicles.
+        dfreader = self.dfreader_for_current_onboard_log()
+        saw_performing_event = False
+        saw_show = False
+        saw_gps_epoch = False
+        while True:
+            m = dfreader.recv_match(type=['SHEV', 'SHOW'])
+            if m is None:
+                break
+            if m.get_type() == 'SHEV':
+                if m.Stage == 4:  # ModeShow::Stage::PERFORMING
+                    saw_performing_event = True
+            else:
+                saw_show = True
+            if m.GpsEpoch > 0:
+                saw_gps_epoch = True
+        if not saw_performing_event:
+            raise NotAchievedException("No SHEV stage=PERFORMING event in the log")
+        if not saw_show:
+            raise NotAchievedException("No SHOW periodic messages in the log")
+        if not saw_gps_epoch:
+            raise NotAchievedException("SHOW log messages carry no GPS epoch time")
+
     def _interp_trajectory(self, traj, t_ms):
         '''linear interpolation of a trajectory list at t_ms, for target comparison'''
         if t_ms <= traj[0][0]:

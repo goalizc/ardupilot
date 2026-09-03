@@ -30,14 +30,20 @@ def generate(duration_s=60, drone_id=7):
     """Return the full show file bytes for a rectangle out-and-back flight."""
     duration_ms = duration_s * 1000
     alt_mm = -5000          # 5m, NED down-positive
+    # displacement scales with duration so the leg speed stays gentle
+    # (20m at 60s = ~0.9 m/s); hover first so the aircraft is settled at
+    # the origin before the trajectory demands any motion
+    span = 20000 * duration_s // 60
     # waypoints (t_ms, x_mm=N, y_mm=E) in the show frame
-    leg1_end = int(0.35 * duration_ms)      # 35% of the show: go east
-    leg2_end = int(0.65 * duration_ms)      # 65%: go north
-    leg3_end = int(0.85 * duration_ms)      # 85%: return to origin
-    east_m = 20000          # 20m east
-    north_m = 20000         # 20m north
+    hover_end = int(0.20 * duration_ms)     # hover at the origin
+    leg1_end = int(0.45 * duration_ms)      # then east
+    leg2_end = int(0.70 * duration_ms)      # then north
+    leg3_end = int(0.90 * duration_ms)      # return to origin
+    east_m = span
+    north_m = span
     waypoints = [
         (0, 0, 0),
+        (hover_end, 0, 0),
         (leg1_end, 0, east_m),
         (leg2_end, north_m, east_m),
         (leg3_end, 0, 0),
