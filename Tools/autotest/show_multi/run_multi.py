@@ -30,16 +30,22 @@ UNIX_OFFSET_MSEC = 17000 * 86400 + 520 * 604800 * 1000 - 18000  # from AP_GPS.h
 
 
 class Instance:
-    def __init__(self, idx, workdir, start_time, duration_s, speedup, frame_ms=1000):
+    def __init__(self, idx, workdir, start_time, duration_s, speedup,
+                 frame_ms=1000, shape='rect', alt_m=5.0, center=(0, 0)):
         self.idx = idx
         self.workdir = workdir
+        self.shape = shape
+        self.alt_m = alt_m
+        self.center = center
         os.makedirs(workdir, exist_ok=True)
         showdir = os.path.join(workdir, "show")
         os.makedirs(showdir, exist_ok=True)
         self.show_path = os.path.join(showdir, "show.bin")
         # generate the demo show file for this instance
         gen = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gen_show.py")
-        cmd = [sys.executable, gen, self.show_path, str(duration_s)]
+        cmd = [sys.executable, gen, self.show_path, str(duration_s),
+               '--shape', shape, '--alt-m', str(alt_m),
+               '--center', "%d,%d" % center]
         if frame_ms != 1000:
             cmd += ['--frame-ms', str(frame_ms)]
         subprocess.check_call(cmd)
@@ -185,13 +191,38 @@ def main():
     ap.add_argument('--duration', type=int, default=60)
     ap.add_argument('--speedup', type=float, default=1.0)
     ap.add_argument('--frame-ms', type=int, default=1000)
+    ap.add_argument('--shapes', default='rect',
+                    help='comma-separated shape list, cycled over the '
+                         'instances (rect,circle,figure8,triangle,diamond)')
+    ap.add_argument('--rows', type=int, default=1,
+                    help='arrange the fleet in this many rows; each row '
+                         'flies 2m higher (altitude layering)')
+    ap.add_argument('--spacing', type=float, default=9.0,
+                    help='horizontal/vertical spacing between shape '
+                         'centres, metres (shapes span ~8m with the '
+                         'default sizes)')
+    ap.add_argument('--alt-m', type=float, default=5.0,
+                    help='altitude of the first row, metres')
     ap.add_argument('--out', default=os.path.join(ROOT, "sitl", "show_multi_run"))
     args = ap.parse_args()
 
+    shapes = [s.strip() for s in args.shapes.split(',') if s.strip()]
     os.makedirs(args.out, exist_ok=True)
     start_time_utc = int(time.time())
     margin_s = 60          # seconds after the last GPS fix before T0
     instances = []
+
+    def layout(i):
+        """(shape, alt_m, center_mm) for instance i: shapes cycle across
+        the fleet, the fleet is arranged in rows, each row 2m higher."""
+        per_row = (args.count + args.rows - 1) // args.rows
+        row = i // per_row
+        col = i % per_row
+        shape = shapes[i % len(shapes)]
+        alt = args.alt_m + 2.0 * row
+        cx = int((col - (per_row - 1) / 2.0) * args.spacing * 1000)
+        cy = int((row - (args.rows - 1) / 2.0) * args.spacing * 1000)
+        return shape, alt, (cx, cy)
 
     try:
         # phase 1: start everything, then connect in parallel.  A SITL
@@ -200,12 +231,17 @@ def main():
         # clock offset equal to the connect order delay.  Parallel
         # connects keep the formation on the same clock.
         print(f"starting {args.count} instances (speedup {args.speedup}, "
-              f"show {args.duration}s)...", flush=True)
+              f"show {args.duration}s, shapes {shapes}, "
+              f"{args.rows} row(s), {args.spacing}m spacing)...", flush=True)
         for i in range(args.count):
+            shape, alt, center = layout(i)
             inst = Instance(i, os.path.join(args.out, f"inst{i}"),
-                            start_time_utc, args.duration, args.speedup, args.frame_ms)
+                            start_time_utc, args.duration, args.speedup,
+                            args.frame_ms, shape, alt, center)
             inst.start()
             instances.append(inst)
+            print(f"  inst{i}: shape={shape} alt={alt}m "
+                  f"center={center}", flush=True)
         # wait until every TCP port is listening (startup), then connect
         # all instances at the same moment
         deadline = time.time() + 60
