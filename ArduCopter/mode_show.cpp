@@ -496,10 +496,12 @@ void ModeShow::_rtl_run()
         copter.mode_rtl.init(true);
     }
     copter.mode_rtl.run();
-    if (copter.ap.land_complete) {
-        // the RTL has landed; move on to the landed stage.  Without this
-        // transition the RTL sub-mode keeps running and its landing
-        // detector would disarm the vehicle again on a subsequent re-arm.
+    if (copter.ap.land_complete && !copter.motors->armed()) {
+        // the RTL has landed and disarmed (mode_rtl.run() performs the
+        // disarm once the spool reaches GROUND_IDLE).  Waiting for the
+        // disarm keeps the vehicle from staying armed on the ground, and
+        // leaving after a clean disarm leaves no landing-detector residue
+        // that could disarm a subsequent re-arm.
         _landed_start();
     }
 }
@@ -519,7 +521,11 @@ void ModeShow::_landing_run()
         copter.mode_land.init(true);
     }
     copter.mode_land.run();
-    if (copter.ap.land_complete) {
+    // let the LAND sub-mode finish its own disarm (land_complete +
+    // spool GROUND_IDLE).  Taking over on land_complete alone would leave
+    // the vehicle armed on the ground.  Once disarmed the landing detector
+    // state is clean, so a later re-arm is not at risk either.
+    if (copter.ap.land_complete && !copter.motors->armed()) {
         _landed_start();
     }
 }
