@@ -7318,11 +7318,37 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
                         break
                 if flags is not None:
                     break
-                self.delay_sim_time(0.2)
+                self.delay_sim_time(0.2, 'wait for deferred STATUS send')
             self.context_pop()
             if flags is None:
                 raise NotAchievedException("Did not receive DATA16 status packet")
             return flags
+
+        # a CLOCK survey (DATA32, data[0]==8) has its own request
+        # (sub-command 12); decode it and return flags/stage/sync plus
+        # the GPS-epoch and internal microsecond timestamps
+        def clock_after(sub, p2=0, p3=0):
+            self.context_push()
+            self.context_collect('DATA32')
+            self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=sub, p2=p2, p3=p3,
+                         want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
+            c = self.context_get()
+            clock = None
+            tstart = self.get_sim_time()
+            while self.get_sim_time_cached() < tstart + 10:
+                for x in c.collections['DATA32']:
+                    if x.data[0] == 8:
+                        clock = x.data
+                        break
+                if clock is not None:
+                    break
+                self.delay_sim_time(0.2, 'wait for deferred CLOCK send')
+            self.context_pop()
+            if clock is None:
+                raise NotAchievedException("Did not receive DATA32 clock packet")
+            (gps_epoch_us,) = struct.unpack('<Q', bytes(clock[4:12]))
+            (internal_us,) = struct.unpack('<Q', bytes(clock[12:20]))
+            return clock[1], clock[2], clock[3], gps_epoch_us, internal_us
 
         # 1. set start time + grant authorization; the START_CONFIG handler
         #    requests a status report, so a DATA16 status packet with
@@ -7331,10 +7357,48 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         if flags != 0x07:
             raise NotAchievedException("Expected flags 0x07 after grant, got 0x%02x" % flags)
 
+        # 1b. the CLOCK survey is requested separately (sub-command 12):
+        #     its own flags byte matches the vehicle state (0x07 here) and
+        #     both timestamps are populated
+        cflags, cstage, csync, gps_epoch_us, internal_us = clock_after(12)
+        if cflags != 0x07:
+            raise NotAchievedException("Expected CLOCK flags 0x07, got 0x%02x" % cflags)
+        if gps_epoch_us == 0 or internal_us == 0:
+            raise NotAchievedException("CLOCK timestamps not populated")
+
         # 2. request the status via sub-command 11
         flags = status_flags_after(11)
         if flags != 0x07:
             raise NotAchievedException("Expected flags 0x07 on request, got 0x%02x" % flags)
+
+        # 2b. a plain status poll must NOT drag a CLOCK survey along: wait
+        #     long enough for the deferred send, then check no DATA32 with
+        #     data[0]==8 arrived
+        self.context_push()
+        self.context_collect('DATA32')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_USER_1, p1=11,
+                     want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED)
+        c = self.context_get()
+        tstart = self.get_sim_time()
+        while self.get_sim_time_cached() < tstart + 2:
+            for x in c.collections['DATA32']:
+                if x.data[0] == 8:
+                    raise NotAchievedException("STATUS poll returned a CLOCK survey")
+            self.delay_sim_time(0.2, 'wait for absence of CLOCK survey')
+        self.context_pop()
+
+        # 2c. the GPS epoch and the internal clock are read back-to-back in
+        #     the same send, and in SITL both anchor to the same host time
+        #     (measured 0.000s spread), so the two DELTAs between consecutive
+        #     CLOCK samples must agree; allow 20ms for scheduler jitter
+        _, _, _, gps_epoch_us2, internal_us2 = clock_after(12)
+        dgps = gps_epoch_us2 - gps_epoch_us
+        dint = internal_us2 - internal_us
+        if dgps <= 0 or dint <= 0:
+            raise NotAchievedException("CLOCK timestamps did not advance")
+        if abs(dgps - dint) > 20000:
+            raise NotAchievedException(
+                "CLOCK deltas disagree: dgps=%d dint=%d" % (dgps, dint))
 
         # 3. revoke authorization; the authorized bit must clear
         flags = status_flags_after(10, p2=now_tow + 60, p3=0)
@@ -7376,7 +7440,7 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
                 saw_landing = True
             if saw_revoked and saw_landing:
                 break
-            self.delay_sim_time(0.5)
+            self.delay_sim_time(0.5, 'wait for revocation landing messages')
         self.context_pop()
         if not saw_revoked:
             raise NotAchievedException("Did not see revocation notice")
