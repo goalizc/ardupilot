@@ -323,6 +323,11 @@ bool GCS_MAVLINK_Copter::try_send_message(enum ap_message id)
         CHECK_PAYLOAD_SIZE(DATA16);
         copter.show_manager.send_status_data(chan);
         break;
+    case MSG_SHOW_CLOCK:
+        // per-vehicle clock survey (D6): GPS epoch + internal clock
+        CHECK_PAYLOAD_SIZE(DATA32);
+        copter.show_manager.send_clock_data(chan);
+        break;
 #endif
     default:
         return GCS_MAVLINK::try_send_message(id);
@@ -502,7 +507,8 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_packet(const mavlink_command_i
         //  10 = START_CONFIG: param2 = start time (GPS ToW seconds, -1 to
         //       clear), param3 = authorization (0 revoked, 1 granted),
         //       param4 = countdown hint in ms (display only)
-        //  11 = STATUS_REQUEST: report the show status as a STATUSTEXT
+        //  11 = STATUS_REQUEST: report the show status as a DATA16 packet
+        //  12 = CLOCK_REQUEST: report the clock survey as a DATA32 packet
         const int32_t sub = (int32_t)packet.param1;
         switch (sub) {
         case 0:
@@ -526,6 +532,9 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_packet(const mavlink_command_i
         }
         case 11:
             copter.show_manager.request_status_send();
+            return MAV_RESULT_ACCEPTED;
+        case 12:
+            copter.show_manager.request_clock_send();
             return MAV_RESULT_ACCEPTED;
         default:
             return MAV_RESULT_FAILED;
