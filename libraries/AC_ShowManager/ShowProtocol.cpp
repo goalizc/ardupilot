@@ -9,9 +9,11 @@ const uint8_t ShowProtocol::START_CONFIG;
 const uint8_t ShowProtocol::ACKNOWLEDGMENT;
 const uint8_t ShowProtocol::STATUS_REQUEST;
 const uint8_t ShowProtocol::STATUS;
+const uint8_t ShowProtocol::CLOCK;
 const uint8_t ShowProtocol::START_CONFIG_LEN;
 const uint8_t ShowProtocol::ACK_LEN;
 const uint8_t ShowProtocol::STATUS_LEN;
+const uint8_t ShowProtocol::CLOCK_LEN;
 
 uint8_t ShowProtocol::parse_type(const uint8_t *data, uint8_t len)
 {
@@ -52,4 +54,34 @@ uint8_t ShowProtocol::build_status(uint8_t *buf, uint8_t flags, uint8_t stage,
     memcpy(&buf[3], &start_tow_sec, 4);
     memcpy(&buf[7], &duration_ms, 4);
     return STATUS_LEN;
+}
+
+// build_clock - CLOCK payload for DATA32
+uint8_t ShowProtocol::build_clock(uint8_t *buf, uint8_t flags, uint8_t stage,
+                                  uint8_t sync_mode, uint64_t gps_epoch_us,
+                                  uint64_t internal_us)
+{
+    buf[0] = CLOCK;
+    buf[1] = flags;
+    buf[2] = stage;
+    buf[3] = sync_mode;
+    memcpy(&buf[4], &gps_epoch_us, 8);
+    memcpy(&buf[12], &internal_us, 8);
+    return CLOCK_LEN;
+}
+
+// parse_clock - decode a CLOCK payload
+bool ShowProtocol::parse_clock(const uint8_t *data, uint8_t len,
+                               uint8_t &flags, uint8_t &stage, uint8_t &sync_mode,
+                               uint64_t &gps_epoch_us, uint64_t &internal_us)
+{
+    if (len < CLOCK_LEN || data[0] != CLOCK) {
+        return false;
+    }
+    flags = data[1];
+    stage = data[2];
+    sync_mode = data[3];
+    memcpy(&gps_epoch_us, &data[4], 8);
+    memcpy(&internal_us, &data[12], 8);
+    return true;
 }

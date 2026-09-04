@@ -64,6 +64,7 @@ public:
     bool stream_light_view(const ShowFile::LightEvent *&frames, uint16_t &count) const {
         return _reader.light_view(frames, count);
     }
+    void send_clock_data(mavlink_channel_t chan);
     bool stream_started() const { return _reader.started(); }
     bool stream_ready_to_play() const { return _reader.ready_to_play(); }
     void stream_close() { _reader.close(); }
@@ -131,6 +132,12 @@ public:
     // loop (sending directly from a packet-receive context loses packets)
     void request_status_send();
 
+    // request a clock survey; the next 50Hz update() pushes
+    // MSG_SHOW_CLOCK so the DATA32 send happens from the GCS main send
+    // loop.  Kept separate from request_status_send(): a status poll in
+    // the field must not drag clock-survey bytes along.
+    void request_clock_send();
+
     // current show stage (0=off,1=waiting,2=takeoff,3=performing,4=end);
     // reported by ModeShow via set_stage
     uint8_t stage() const { return _stage; }
@@ -176,6 +183,8 @@ private:
                                     // the GCS main send loop (not from the
                                     // packet-receive context, where direct
                                     // mavlink sends get lost)
+    bool _clock_requested;          // a clock survey was requested; the 50Hz
+                                    // update() pushes MSG_SHOW_CLOCK (DATA32)
 
     // streaming reader for the (verified) show file
     ShowStreamReader _reader;

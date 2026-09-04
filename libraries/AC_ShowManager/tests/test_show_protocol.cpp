@@ -75,5 +75,33 @@ TEST(ShowProtocol, BuildStatus)
     EXPECT_EQ(dur, 20000U);
 }
 
+TEST(ShowProtocol, BuildAndParseClock)
+{
+    uint8_t buf[ShowProtocol::CLOCK_LEN];
+    const uint64_t gps = 1788454421853615ULL;
+    const uint64_t internal = 1234567890123ULL;
+    const uint8_t n = ShowProtocol::build_clock(buf, 0x03, 3, 0, gps, internal);
+    EXPECT_EQ(n, ShowProtocol::CLOCK_LEN);
+    EXPECT_EQ(buf[0], ShowProtocol::CLOCK);
+    uint8_t flags, stage, sync_mode;
+    uint64_t gps_out, internal_out;
+    EXPECT_TRUE(ShowProtocol::parse_clock(buf, n, flags, stage, sync_mode,
+                                          gps_out, internal_out));
+    EXPECT_EQ(flags, 0x03);
+    EXPECT_EQ(stage, 3);
+    EXPECT_EQ(sync_mode, 0);
+    EXPECT_EQ(gps_out, gps);
+    EXPECT_EQ(internal_out, internal);
+    // reject wrong type or short payload
+    uint8_t bad[ShowProtocol::CLOCK_LEN];
+    memcpy(bad, buf, sizeof(bad));
+    bad[0] = ShowProtocol::STATUS;
+    EXPECT_FALSE(ShowProtocol::parse_clock(bad, n, flags, stage, sync_mode,
+                                           gps_out, internal_out));
+    EXPECT_FALSE(ShowProtocol::parse_clock(buf, ShowProtocol::CLOCK_LEN - 1,
+                                           flags, stage, sync_mode,
+                                           gps_out, internal_out));
+}
+
 AP_GTEST_PANIC()
 AP_GTEST_MAIN()

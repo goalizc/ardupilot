@@ -160,6 +160,7 @@ AC_ShowManager::AC_ShowManager(void)
     _start_internal_usec = 0;
     _stage = 0;
     _status_requested = false;
+    _clock_requested = false;
     _load_attempted = false;
 }
 
@@ -280,11 +281,18 @@ void AC_ShowManager::update()
     }
 
     // a status report was requested from the packet-receive context; push
-    // MSG_SHOW_STATUS now, from the scheduler main loop, so the DATA16
-    // send happens in the GCS update_send context where it is reliable
+    // MSG_SHOW_STATUS now, from the scheduler main loop, so the send
+    // happens in the GCS update_send context where it is reliable
     if (_status_requested) {
         _status_requested = false;
         gcs().send_message(MSG_SHOW_STATUS);
+    }
+    // a clock survey was requested the same way; it stays a separate
+    // request/response pair so a field status poll never drags the
+    // clock-survey bytes along
+    if (_clock_requested) {
+        _clock_requested = false;
+        gcs().send_message(MSG_SHOW_CLOCK);
     }
 }
 
@@ -348,6 +356,34 @@ void AC_ShowManager::send_status_data(mavlink_channel_t chan)
     mavlink_msg_data16_send(chan, m.type, m.len, m.data);
 }
 
+// send_clock_data - report the per-vehicle clock survey as a DATA32.
+// The flags byte matches the STATUS packet so a ground station can pair
+// the two reports for the same vehicle state.
+void AC_ShowManager::send_clock_data(mavlink_channel_t chan)
+{
+    uint8_t flags = 0;
+    if (is_loaded()) {
+        flags |= 0x01;
+    }
+    if (start_time_valid()) {
+        flags |= 0x02;
+    }
+    if (authorized()) {
+        flags |= 0x04;
+    }
+    uint8_t buf[ShowProtocol::CLOCK_LEN];
+    const uint8_t n = ShowProtocol::build_clock(buf, flags, stage(),
+                                                (uint8_t)_sync_mode.get(),
+                                                AP::gps().time_epoch_usec(),
+                                                AP_HAL::micros64());
+    mavlink_data32_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = ShowProtocol::DRONE_TO_GCS;
+    m.len = n;
+    memcpy(m.data, buf, n);
+    mavlink_msg_data32_send(chan, m.type, m.len, m.data);
+}
+
 // request_status_send - request a status report
 void AC_ShowManager::request_status_send()
 {
@@ -356,6 +392,12 @@ void AC_ShowManager::request_status_send()
     // packet-receive path) loses the packet, so the actual DATA16 send
     // always happens from the scheduler main loop.
     _status_requested = true;
+}
+
+// request_clock_send - request a clock survey (DATA32 CLOCK report)
+void AC_ShowManager::request_clock_send()
+{
+    _clock_requested = true;
 }
 
 // reload - reload the show file from storage

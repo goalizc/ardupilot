@@ -22,11 +22,13 @@ public:
     static const uint8_t ACKNOWLEDGMENT = 4;
     static const uint8_t STATUS_REQUEST = 6;
     static const uint8_t STATUS = 7;
+    static const uint8_t CLOCK = 8;
 
     // minimum payload lengths (data[0] included)
     static const uint8_t START_CONFIG_LEN = 10;
     static const uint8_t ACK_LEN = 3;
     static const uint8_t STATUS_LEN = 12;
+    static const uint8_t CLOCK_LEN = 19;
 
     // inner packet type from a received payload; 0 if empty
     static uint8_t parse_type(const uint8_t *data, uint8_t len);
@@ -46,4 +48,16 @@ public:
     // build a STATUS payload into buf; returns the payload length (STATUS_LEN)
     static uint8_t build_status(uint8_t *buf, uint8_t flags, uint8_t stage,
                                 int32_t start_tow_sec, uint32_t duration_ms);
+
+    // build a CLOCK payload (for DATA32) into buf; returns the payload
+    // length (CLOCK_LEN).  Used to record per-vehicle time sources for
+    // ground-station / hardware receiver surveys.
+    static uint8_t build_clock(uint8_t *buf, uint8_t flags, uint8_t stage,
+                               uint8_t sync_mode, uint64_t gps_epoch_us,
+                               uint64_t internal_us);
+
+    // decode a CLOCK payload into its fields; false on type/size mismatch
+    static bool parse_clock(const uint8_t *data, uint8_t len,
+                            uint8_t &flags, uint8_t &stage, uint8_t &sync_mode,
+                            uint64_t &gps_epoch_us, uint64_t &internal_us);
 };
