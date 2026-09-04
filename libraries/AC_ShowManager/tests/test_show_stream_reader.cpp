@@ -103,6 +103,9 @@ public:
     void fail_next_reads(uint32_t n) { _fail_remaining = n; }
     // fail every read() from now on
     void fail_forever() { _fail_forever = true; }
+    // simulate the storage being cut short mid-playback: reads past
+    // 'limit' return EOF
+    void truncate(uint32_t limit) { _limit = limit; }
     uint32_t read_calls() const { return _read_calls; }
     uint32_t pos() const { return _pos; }
 
@@ -116,7 +119,8 @@ public:
             }
             return -1;
         }
-        const uint32_t avail = _data.size() - _pos;
+        const uint32_t end = _limit < _data.size() ? _limit : _data.size();
+        const uint32_t avail = end - _pos;
         const uint32_t n = avail < len ? avail : len;
         if (n == 0) {
             return 0;    // EOF
@@ -131,6 +135,7 @@ public:
 private:
     const std::vector<uint8_t> &_data;
     uint32_t _pos = 0;
+    uint32_t _limit = 0xffffffffU;
     uint32_t _fail_remaining = 0;
     bool _fail_forever = false;
     uint32_t _read_calls = 0;
@@ -274,6 +279,41 @@ TEST(ShowStreamReader, ExhaustsOnPersistentFailure)
     bool exhausted = false;
     // walk past the first window; the refill never succeeds
     for (uint32_t t = 0; t < 5 * SHOW_STREAM_WINDOW_FRAMES * 10; t += 100) {
+        r.update(t);
+        if (!r.can_evaluate(t)) {
+            exhausted = true;
+            break;
+        }
+        ASSERT_TRUE(r.position_view(frames, count));
+    }
+    EXPECT_TRUE(exhausted);
+    r.close();
+}
+
+// EOF that arrives before the declared frame count (e.g. the storage was
+// truncated mid-show on a frame boundary) must exhaust after the grace
+// period, not clamp: the vehicle must not keep hovering on the last
+// frame until the choreography duration has run out.
+TEST(ShowStreamReader, ExhaustsOnPrematureEof)
+{
+    const uint32_t n = 3 * SHOW_STREAM_WINDOW_FRAMES + 10;   // ~3 blocks
+    const uint32_t dur = n * 10;
+    std::vector<uint8_t> f = make_file(n, dur);
+    MemSource src(f);
+    ShowStreamReader r;
+    ASSERT_TRUE(r.load_and_verify(src));
+    ASSERT_TRUE(r.start());
+    // cut the file cleanly after 250 position frames (each 25 bytes, after
+    // the 32-byte magic+header+crc prefix): reads past that return EOF on
+    // a frame boundary, so the reader sees a clean early EOF
+    const uint32_t kept = 250;
+    src.truncate(32U + kept * 25U);
+
+    const ShowFile::Keyframe *frames = nullptr;
+    uint16_t count = 0;
+    bool exhausted = false;
+    // walk well past the truncated data + the 2s grace period
+    for (uint32_t t = 0; t < dur + 6000; t += 100) {
         r.update(t);
         if (!r.can_evaluate(t)) {
             exhausted = true;

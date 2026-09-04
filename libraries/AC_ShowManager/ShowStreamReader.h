@@ -167,7 +167,12 @@ private:
     bool _refill_pending;      // standby buffer needs (re)filling
     bool _started;
     bool _eof;
+    bool _eof_premature;       // EOF before the declared frame count
+                               // (storage truncated mid-playback)
     bool _loaded;
+
+    uint32_t _expected_kf;     // position frames declared in the header
+    uint32_t _kf_filled;       // position frames parsed since start()
 
     uint32_t _last_refill_ms;
     uint32_t _last_success_ms;    // last successful refill (main-loop ms)

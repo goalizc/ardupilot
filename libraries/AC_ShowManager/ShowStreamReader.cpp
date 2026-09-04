@@ -15,7 +15,10 @@ ShowStreamReader::ShowStreamReader()
     _refill_pending = false;
     _started = false;
     _eof = false;
+    _eof_premature = false;
     _loaded = false;
+    _expected_kf = 0;
+    _kf_filled = 0;
     _have_anchor = false;
     _pending_light_count = 0;
     _block_count[0] = _block_count[1] = 0;
@@ -108,6 +111,7 @@ bool ShowStreamReader::load_and_verify(BlockSource &src)
     }
 
     // ---- pass 2: rewind to the head and fill block 0 ----
+    _expected_kf = _parser.keyframe_count();
     if (!src.rewind()) {
         _failure = ShowFileParser::Failure::TRUNCATED;
         src.close();
@@ -144,6 +148,8 @@ bool ShowStreamReader::start()
     _block_count[0] = _block_count[1] = 0;
     _light_count[0] = _light_count[1] = 0;
     _eof = false;
+    _eof_premature = false;
+    _kf_filled = 0;
     _refill_pending = true;
     _io_len = 0;
     _io_pos = 0;
@@ -263,6 +269,7 @@ int8_t ShowStreamReader::refill_block(uint8_t buf)
                 if (type == ShowFile::EVENT_POSITION) {
                     _block[buf][_block_count[buf]] = kf;
                     _block_count[buf]++;
+                    _kf_filled++;
                 } else if (type == ShowFile::EVENT_LIGHT) {
                     if (_light_count[buf] < SHOW_STREAM_WINDOW_FRAMES) {
                         _light[buf][_light_count[buf]] = le;
@@ -297,6 +304,10 @@ int8_t ShowStreamReader::refill_block(uint8_t buf)
         }
         if (got == 0) {
             _eof = true;
+            // an EOF before the declared position-frame count means the
+            // storage ended early (corrupted/truncated mid-playback) - the
+            // playback must exhaust instead of clamping on the last frame
+            _eof_premature = (_kf_filled < _expected_kf);
             return _block_count[buf] > 0 ? 1 : 0;   // partial final block
         }
         _io_len += got;
@@ -416,9 +427,15 @@ bool ShowStreamReader::can_evaluate(uint32_t t_ms) const
         return false;
     }
     if (_eof) {
-        // no more data; the show end is judged by duration upstream and
-        // the last frame is clampable
-        return true;
+        if (_eof_premature) {
+            // the storage ended before the declared frame count (truncated
+            // mid-playback): fall through to the exhaustion grace check so
+            // the vehicle stops instead of hovering on the last frame
+        } else {
+            // natural end of the file; the show end is judged by duration
+            // upstream and the last frame is clampable
+            return true;
+        }
     }
     const uint16_t pc = _block_count[_playing];
     if (pc > 0 && t_ms <= _block[_playing][pc - 1].t_ms) {
