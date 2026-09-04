@@ -30,7 +30,7 @@ UNIX_OFFSET_MSEC = 17000 * 86400 + 520 * 604800 * 1000 - 18000  # from AP_GPS.h
 
 
 class Instance:
-    def __init__(self, idx, workdir, start_time, duration_s, speedup):
+    def __init__(self, idx, workdir, start_time, duration_s, speedup, frame_ms=1000):
         self.idx = idx
         self.workdir = workdir
         os.makedirs(workdir, exist_ok=True)
@@ -39,7 +39,10 @@ class Instance:
         self.show_path = os.path.join(showdir, "show.bin")
         # generate the demo show file for this instance
         gen = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gen_show.py")
-        subprocess.check_call([sys.executable, gen, self.show_path, str(duration_s)])
+        cmd = [sys.executable, gen, self.show_path, str(duration_s)]
+        if frame_ms != 1000:
+            cmd += ['--frame-ms', str(frame_ms)]
+        subprocess.check_call(cmd)
         self.port = 5760 + 10 * idx   # SITL adds 10*instance to all port numbers
         self.conn = None
         self.proc = None
@@ -181,6 +184,7 @@ def main():
     ap.add_argument('--count', type=int, default=10)
     ap.add_argument('--duration', type=int, default=60)
     ap.add_argument('--speedup', type=float, default=1.0)
+    ap.add_argument('--frame-ms', type=int, default=1000)
     ap.add_argument('--out', default=os.path.join(ROOT, "sitl", "show_multi_run"))
     args = ap.parse_args()
 
@@ -199,7 +203,7 @@ def main():
               f"show {args.duration}s)...", flush=True)
         for i in range(args.count):
             inst = Instance(i, os.path.join(args.out, f"inst{i}"),
-                            start_time_utc, args.duration, args.speedup)
+                            start_time_utc, args.duration, args.speedup, args.frame_ms)
             inst.start()
             instances.append(inst)
         # wait until every TCP port is listening (startup), then connect

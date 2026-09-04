@@ -35,8 +35,9 @@ def crc32_stream(data, crc=0):
     return crc
 
 
-def generate(duration_s=60, drone_id=7):
-    """Return the full v2 show file for a rectangle out-and-back flight."""
+def generate(duration_s=60, drone_id=7, frame_ms=1000):
+    """Return the full v2 show file for a rectangle out-and-back flight.
+    frame_ms is the position-frame spacing (1000ms = 1Hz, 100ms = 10Hz)."""
     duration_ms = duration_s * 1000
     alt_mm = -5000          # 5m, NED down-positive
     span = 20000 * duration_s // 60          # displacement scales with duration
@@ -53,11 +54,11 @@ def generate(duration_s=60, drone_id=7):
         (duration_ms, 0, 0),
     ]
 
-    # 1s-spaced position frames
+    # position frames every frame_ms
     frames = []                      # (t_ms, type, payload...)
-    n_kf = duration_s + 1
+    n_kf = duration_ms // frame_ms + 1
     for i in range(n_kf):
-        t = i * 1000
+        t = i * frame_ms
         for wi in range(len(waypoints) - 1):
             (t0, x0, y0) = waypoints[wi]
             (t1, x1, y1) = waypoints[wi + 1]
@@ -141,11 +142,14 @@ def main():
     out = args[0]
     duration_s = int(args[1]) if len(args) > 1 else 60
     drone_id = 7
+    frame_ms = 1000
     if '--drone-id' in args:
         drone_id = int(args[args.index('--drone-id') + 1])
+    if '--frame-ms' in args:
+        frame_ms = int(args[args.index('--frame-ms') + 1])
     with open(out, 'wb') as f:
-        f.write(generate(duration_s=duration_s, drone_id=drone_id))
-    print("wrote %s (%us show)" % (out, duration_s))
+        f.write(generate(duration_s=duration_s, drone_id=drone_id, frame_ms=frame_ms))
+    print("wrote %s (%us show, %ums frames)" % (out, duration_s, frame_ms))
     check(out)
 
 
